@@ -1,0 +1,5 @@
+aiohttp>=3.13.3
+asyncio>=4.0.0
+python-dotenv>=1.2.2
+websockets>=16.0
+requests>=2.32.5
