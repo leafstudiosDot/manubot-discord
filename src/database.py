@@ -22,6 +22,9 @@ def init_db(db_path: Path) -> None:
 
 
 def insert_event(db_path: Path, event_type: str, sequence, payload: dict) -> None:
+    if event_type == "OP_11":
+        return
+
     conn = sqlite3.connect(db_path)
     conn.execute(
         """
