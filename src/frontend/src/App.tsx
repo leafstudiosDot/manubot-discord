@@ -7,6 +7,7 @@ import DirectMessages from "./routes/DirectMessages";
 import Servers from "./routes/Servers";
 import DangerZone from "./routes/DangerZone";
 import NotFound from "./routes/NotFound";
+import { APP_VERSION } from "./version";
 
 function buildWsUrl(path: string) {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
@@ -128,7 +129,7 @@ function App() {
       <header className="mb-6 flex items-center justify-between gap-4">
         <div>
           <h1 className="m-0 text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">Manubot Control Panel</h1>
-          <p className="mt-2 text-slate-500">v0.0.1</p>
+          <p className="mt-2 text-slate-500">{APP_VERSION}</p>
         </div>
         <button
           type="button"

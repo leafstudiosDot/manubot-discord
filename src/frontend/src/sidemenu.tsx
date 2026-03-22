@@ -1,4 +1,5 @@
 import { NavLink } from "react-router-dom";
+import { APP_VERSION } from "./version";
 
 type SideMenuProps = {
   isOpen: boolean;
@@ -70,7 +71,7 @@ function SideMenu({ isOpen, onNavigate }: SideMenuProps) {
           </NavLink>
         </nav>
         <p className="mt-4 text-xs text-slate-400">
-          Powered by Manubot v0.0.1
+          Powered by Manubot {APP_VERSION}
         </p>
       </div>
     </aside>

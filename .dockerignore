@@ -8,6 +8,7 @@ __pycache__
 *.pyd
 *.log
 *.db
+*.db.bak
 .env
 src/frontend/node_modules
 src/frontend/dist

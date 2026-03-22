@@ -59,19 +59,6 @@ python src/main.py
 Flask will serve the built React app from `src/frontend/dist`
 - `http://localhost:6540/` (dashboard)
 
-## Environment variables
-
-Use your `.env` file:
-
-```env
-TOKEN=your_discord_bot_token
-APP_ID=your_discord_application_id
-API_PORT=6540
-DB_PATH=src/manubot.db
-```
-
-`DB_PATH` is optional for local non-Docker runs.
-
 ## 4) Docker (single image)
 
 Build a production image (frontend is built inside Docker):
@@ -112,6 +99,19 @@ Stop:
 docker compose down
 ```
 
+## Environment variables
+
+Use your `.env` file:
+
+```env
+TOKEN=your_discord_bot_token
+APP_ID=your_discord_application_id
+API_PORT=6540
+DB_PATH=src/manubot.db
+```
+
+`DB_PATH` is optional for local non-Docker runs.
+
 ## `.env` in Docker
 
 - Do not copy `.env` into the image.
@@ -119,3 +119,26 @@ docker compose down
   - `docker run --env-file .env ...`
   - or `env_file: .env` in Compose (already configured in `docker-compose.yml`)
 - If you use Compose and also set values in `environment:`, those explicit `environment` values win over `env_file` values for same keys.
+
+## Version bump automation
+
+Frontend UI version is now generated from `src/frontend/package.json` during Vite build, so there are no hardcoded `v0.0.x` strings to update in React files.
+
+From `src/frontend/`:
+
+```powershell
+# Increment semver locally (no git tag created by npm)
+npm run version:patch
+npm run version:minor
+npm run version:major
+```
+
+Or sync directly from a git tag:
+
+```powershell
+# Use latest git tag (example: v0.0.3)
+npm run version:sync-tag
+
+# Or pass explicit tag
+npm run version:sync-tag -- v0.0.3
+```

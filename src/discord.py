@@ -107,6 +107,8 @@ async def heartbeat(ws, interval):
 
 
 async def run(token: str, bot_state: dict, save_event):
+    activity_state = str(bot_state.get("version") or "v0.0.0")
+
     async with websockets.connect(GATEWAY_URL) as ws:
         hello_event = await ws.recv()
         hello_data = json.loads(hello_event)
@@ -135,7 +137,7 @@ async def run(token: str, bot_state: dict, save_event):
                         {
                             "name": "Manubot",
                             "type": 4,
-                            "state": "v0.0.1",
+                            "state": activity_state,
                             "flags": 0,
                         }
                     ],

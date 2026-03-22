@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 import threading
 from pathlib import Path
@@ -27,9 +28,29 @@ DEFAULT_DB_PATH = ROOT_DIR / "manubot.db"
 DB_PATH = Path(os.getenv("DB_PATH", str(DEFAULT_DB_PATH)))
 FRONTEND_DIST = ROOT_DIR / "frontend" / "dist"
 API_PORT = int(os.getenv("API_PORT", "6540"))
+
+
+def resolve_app_version() -> str:
+    env_version = (os.getenv("APP_VERSION") or "").strip()
+    if env_version:
+        return env_version if env_version.startswith("v") else f"v{env_version}"
+
+    package_json_path = ROOT_DIR / "frontend" / "package.json"
+    try:
+        package_data = json.loads(package_json_path.read_text(encoding="utf-8"))
+        package_version = str(package_data.get("version") or "").strip()
+        if package_version:
+            return package_version if package_version.startswith("v") else f"v{package_version}"
+    except Exception:
+        pass
+
+    return "v0.0.0"
+
+
 BOT_STATE = {
     "connected": False,
     "last_sequence": None,
+    "version": resolve_app_version(),
     "app_id": APP_ID,
     "bot_user_id": None,
     "profile": None,
