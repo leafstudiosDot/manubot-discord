@@ -23,7 +23,8 @@ TOKEN = os.getenv("TOKEN")
 APP_ID = os.getenv("APP_ID")
 
 ROOT_DIR = Path(__file__).resolve().parent
-DB_PATH = ROOT_DIR / "manubot.db"
+DEFAULT_DB_PATH = ROOT_DIR / "manubot.db"
+DB_PATH = Path(os.getenv("DB_PATH", str(DEFAULT_DB_PATH)))
 FRONTEND_DIST = ROOT_DIR / "frontend" / "dist"
 API_PORT = int(os.getenv("API_PORT", "6540"))
 BOT_STATE = {
