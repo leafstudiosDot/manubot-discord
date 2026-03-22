@@ -1,4 +1,6 @@
-# Manubot
+# Manubot for Discord
+
+An open-source Discord bot
 
 This project now includes:
 - Discord Gateway bot runtime (Python)
@@ -54,10 +56,8 @@ Then run backend:
 python src/main.py
 ```
 
-Flask will serve the built React app from `src/frontend/dist` on:
+Flask will serve the built React app from `src/frontend/dist`
 - `http://localhost:6540/` (dashboard)
-- `http://localhost:6540/api/health`
-- `http://localhost:6540/api/events`
 
 ## Environment variables
 
