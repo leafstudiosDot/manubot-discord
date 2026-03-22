@@ -5,6 +5,11 @@ import Dashboard from "./routes/Dashboard";
 import DangerZone from "./routes/DangerZone";
 import NotFound from "./routes/NotFound";
 
+function buildWsUrl(path: string) {
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${window.location.host}${path}`;
+}
+
 function App() {
   const [health, setHealth] = useState(null);
   const [events, setEvents] = useState([]);
@@ -17,30 +22,102 @@ function App() {
   }, [location.pathname]);
 
   useEffect(() => {
-    const load = async () => {
-      try {
-        const [healthRes, eventsRes] = await Promise.all([
-          fetch("/api/health"),
-          fetch("/api/events?limit=20")
-        ]);
+    let isCancelled = false;
+    let healthWs: WebSocket | null = null;
+    let eventsWs: WebSocket | null = null;
+    let healthConnected = false;
+    let eventsConnected = false;
+    let healthReconnect: number | null = null;
+    let eventsReconnect: number | null = null;
 
-        const [healthData, eventsData] = await Promise.all([
-          healthRes.json(),
-          eventsRes.json()
-        ]);
-
-        setHealth(healthData);
-        setEvents(eventsData);
-      } catch (err) {
-        console.error("Failed to load dashboard", err);
-      } finally {
+    const setReady = () => {
+      if (healthConnected && eventsConnected && !isCancelled) {
         setLoading(false);
       }
     };
 
-    load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
+    const connectHealth = () => {
+      healthWs = new WebSocket(buildWsUrl("/ws/health"));
+
+      healthWs.onopen = () => {
+        healthConnected = true;
+        setReady();
+      };
+
+      healthWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          setHealth(data);
+          setLoading(false);
+        } catch (err) {
+          console.error("Invalid health websocket payload", err);
+        }
+      };
+
+      healthWs.onerror = (err) => {
+        console.error("Health websocket error", err);
+      };
+
+      healthWs.onclose = () => {
+        healthConnected = false;
+        if (!isCancelled) {
+          healthReconnect = window.setTimeout(connectHealth, 1500);
+        }
+      };
+    };
+
+    const connectEvents = () => {
+      eventsWs = new WebSocket(buildWsUrl("/ws/events?limit=20"));
+
+      eventsWs.onopen = () => {
+        eventsConnected = true;
+        setReady();
+      };
+
+      eventsWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          setEvents(Array.isArray(data) ? data : []);
+          setLoading(false);
+        } catch (err) {
+          console.error("Invalid events websocket payload", err);
+        }
+      };
+
+      eventsWs.onerror = (err) => {
+        console.error("Events websocket error", err);
+      };
+
+      eventsWs.onclose = () => {
+        eventsConnected = false;
+        if (!isCancelled) {
+          eventsReconnect = window.setTimeout(connectEvents, 1500);
+        }
+      };
+    };
+
+    connectHealth();
+    connectEvents();
+
+    return () => {
+      isCancelled = true;
+
+      if (healthReconnect !== null) {
+        window.clearTimeout(healthReconnect);
+      }
+
+      if (eventsReconnect !== null) {
+        window.clearTimeout(eventsReconnect);
+      }
+
+      if (healthWs) {
+        healthWs.close();
+      }
+
+      if (eventsWs) {
+        eventsWs.close();
+      }
+    };
   }, []);
 
   return (

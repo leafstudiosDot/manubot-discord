@@ -7,6 +7,17 @@ import websockets
 GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 
 
+def dm_event(event_type: str, payload: dict) -> bool:
+    data = payload.get("d") or {}
+    if not isinstance(data, dict):
+        return False
+
+    if not event_type.startswith("MESSAGE_"):
+        return False
+
+    return data.get("guild_id") is None
+
+
 async def heartbeat(ws, interval):
     while True:
         await asyncio.sleep(interval / 1000)  # interval is in ms
@@ -62,7 +73,11 @@ async def run(token: str, bot_state: dict, save_event):
             sequence = payload.get("s")
             bot_state["last_sequence"] = sequence
 
-            save_event(event_type, sequence, payload)
+            if event_type != "OP_11":
+                print(f"[Gateway] {event_type} seq={sequence}")
+
+            if dm_event(event_type, payload):
+                save_event(event_type, sequence, payload)
 
 
 async def runbot(token: str, bot_state: dict, save_event):

@@ -2,9 +2,12 @@ import os
 import sys
 import threading
 import time
+import json
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from flask import Flask, jsonify, request, send_from_directory
+from flask_sock import Sock
 
 
 def _restart_current_process() -> None:
@@ -15,6 +18,7 @@ def _restart_current_process() -> None:
 
 def create_app(frontend_dist: Path, app_id: str | None, bot_state: dict, get_events, regenerate_db):
     app = Flask(__name__, static_folder=str(frontend_dist), static_url_path="")
+    sock = Sock(app)
 
     @app.get("/api/health")
     def api_health():
@@ -31,6 +35,35 @@ def create_app(frontend_dist: Path, app_id: str | None, bot_state: dict, get_eve
     def api_events():
         limit = request.args.get("limit", default=20, type=int)
         return jsonify(get_events(limit=limit))
+
+    @sock.route("/ws/health")
+    def ws_health(ws):
+        while True:
+            ws.send(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "bot_connected": bot_state["connected"],
+                        "last_sequence": bot_state["last_sequence"],
+                        "app_id": app_id,
+                    }
+                )
+            )
+            time.sleep(2)
+
+    @sock.route("/ws/events")
+    def ws_events(ws):
+        query = parse_qs(ws.environ.get("QUERY_STRING", ""))
+        try:
+            requested_limit = int(query.get("limit", [20])[0])
+        except (TypeError, ValueError):
+            requested_limit = 20
+
+        limit = max(1, min(requested_limit, 20))
+
+        while True:
+            ws.send(json.dumps(get_events(limit=limit)))
+            time.sleep(1)
 
     @app.delete("/api/database/regenerate")
     def api_regenerate_db():
