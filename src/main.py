@@ -4,8 +4,18 @@ import threading
 from pathlib import Path
 from dotenv import load_dotenv
 
-from database import get_events, init_db, insert_event, regenerate_db
-from discord import runbot
+from database import (
+    get_dm_history,
+    get_dm_message,
+    get_dm_users,
+    get_events,
+    init_db,
+    insert_event,
+    mark_dm_message_deleted,
+    regenerate_db,
+    save_sent_dm_message,
+)
+from discord import runbot, send_dm, delete_dm
 from webback import create_app
 
 load_dotenv()
@@ -20,7 +30,9 @@ BOT_STATE = {
     "connected": False,
     "last_sequence": None,
     "app_id": APP_ID,
+    "bot_user_id": None,
     "profile": None,
+    "guilds": [],
 }
 
 app = create_app(
@@ -28,6 +40,19 @@ app = create_app(
     app_id=APP_ID,
     bot_state=BOT_STATE,
     get_events=lambda limit=25: get_events(DB_PATH, limit=limit),
+    get_dm_users=lambda limit_events=300: get_dm_users(DB_PATH, limit_events=limit_events),
+    get_dm_history=lambda user_id, limit=120: get_dm_history(DB_PATH, user_id=user_id, limit=limit),
+    get_dm_message=lambda message_id: get_dm_message(DB_PATH, message_id=message_id),
+    save_sent_dm_message=lambda user_id, message_payload: save_sent_dm_message(
+        DB_PATH, peer_user_id=user_id, message_payload=message_payload
+    ),
+    mark_dm_message_deleted=lambda message_id: mark_dm_message_deleted(DB_PATH, message_id=message_id),
+    send_dm=lambda user_id, content, files: asyncio.run(
+        send_dm(TOKEN, user_id=user_id, content=content, files=files)
+    ),
+    delete_dm=lambda channel_id, message_id: asyncio.run(
+        delete_dm(TOKEN, channel_id=channel_id, message_id=message_id)
+    ),
     regenerate_db=lambda: regenerate_db(DB_PATH),
 )
 

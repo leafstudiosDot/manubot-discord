@@ -3,6 +3,8 @@ import { Route, Routes, useLocation } from "react-router-dom";
 import SideMenu from "./sidemenu";
 
 import Dashboard from "./routes/Dashboard";
+import DirectMessages from "./routes/DirectMessages";
+import Servers from "./routes/Servers";
 import DangerZone from "./routes/DangerZone";
 import NotFound from "./routes/NotFound";
 
@@ -125,8 +127,8 @@ function App() {
     <main className="mx-auto max-w-6xl px-4 pb-12 pt-8">
       <header className="mb-6 flex items-center justify-between gap-4">
         <div>
-        <h1 className="m-0 text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">Manubot Control Panel</h1>
-        <p className="mt-2 text-slate-500">v0.0.1</p>
+          <h1 className="m-0 text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">Manubot Control Panel</h1>
+          <p className="mt-2 text-slate-500">v0.0.1</p>
         </div>
         <button
           type="button"
@@ -155,7 +157,9 @@ function App() {
               path="/"
               element={<Dashboard loading={loading} health={health} events={events} />}
             />
+            <Route path="/servers" element={<Servers loading={loading} />} />
             <Route path="/danger-zone" element={<DangerZone />} />
+            <Route path="/direct-messages" element={<DirectMessages loading={loading} />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
 
