@@ -1,9 +1,19 @@
+import os
+import sys
+import threading
+import time
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
 
-def create_app(frontend_dist: Path, app_id: str | None, bot_state: dict, get_events):
+def _restart_current_process() -> None:
+    # Small delay gives Flask enough time to flush the JSON response.
+    time.sleep(0.6)
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+def create_app(frontend_dist: Path, app_id: str | None, bot_state: dict, get_events, regenerate_db):
     app = Flask(__name__, static_folder=str(frontend_dist), static_url_path="")
 
     @app.get("/api/health")
@@ -21,6 +31,22 @@ def create_app(frontend_dist: Path, app_id: str | None, bot_state: dict, get_eve
     def api_events():
         limit = request.args.get("limit", default=20, type=int)
         return jsonify(get_events(limit=limit))
+
+    @app.delete("/api/database/regenerate")
+    def api_regenerate_db():
+        deleted_count = regenerate_db()
+
+        restart_thread = threading.Thread(target=_restart_current_process, daemon=True)
+        restart_thread.start()
+
+        return jsonify(
+            {
+                "status": "ok",
+                "message": "Database regenerated. All event rows were deleted.",
+                "deleted_count": deleted_count,
+                "restarting": True,
+            }
+        )
 
     @app.route("/", defaults={"path": ""})
     @app.route("/<path:path>")

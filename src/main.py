@@ -4,7 +4,7 @@ import threading
 from pathlib import Path
 from dotenv import load_dotenv
 
-from database import get_events, init_db, insert_event
+from database import get_events, init_db, insert_event, regenerate_db
 from discord import runbot
 from webback import create_app
 
@@ -23,6 +23,7 @@ app = create_app(
     app_id=APP_ID,
     bot_state=BOT_STATE,
     get_events=lambda limit=25: get_events(DB_PATH, limit=limit),
+    regenerate_db=lambda: regenerate_db(DB_PATH),
 )
 
 

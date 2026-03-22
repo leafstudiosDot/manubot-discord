@@ -63,3 +63,15 @@ def get_events(db_path: Path, limit: int = 20) -> list[dict]:
         )
 
     return events
+
+
+def regenerate_db(db_path: Path) -> int:
+    init_db(db_path)
+
+    conn = sqlite3.connect(db_path)
+    deleted_count = conn.execute("SELECT COUNT(*) FROM gateway_events").fetchone()[0]
+    conn.execute("DELETE FROM gateway_events")
+    conn.commit()
+    conn.close()
+
+    return int(deleted_count)

@@ -1,44 +1,6 @@
-import { useEffect, useState } from "react";
-
-function App() {
-  const [health, setHealth] = useState(null);
-  const [events, setEvents] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const [healthRes, eventsRes] = await Promise.all([
-          fetch("/api/health"),
-          fetch("/api/events?limit=20")
-        ]);
-
-        const [healthData, eventsData] = await Promise.all([
-          healthRes.json(),
-          eventsRes.json()
-        ]);
-
-        setHealth(healthData);
-        setEvents(eventsData);
-      } catch (err) {
-        console.error("Failed to load dashboard", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
-  }, []);
-
+function Dashboard({ loading, health, events }) {
   return (
-    <main className="mx-auto max-w-4xl px-4 pb-12 pt-8">
-      <header className="mb-6">
-        <h1 className="m-0 text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">Manubot Control Panel</h1>
-        <p className="mt-2 text-slate-500">v0.0.1</p>
-      </header>
-
+    <>
       <section className="mb-4 rounded-2xl bg-white p-5 shadow-[0_8px_28px_rgba(15,28,45,0.08)]">
         <h2 className="mt-0 text-xl font-semibold text-slate-900">Bot Health</h2>
         {loading && <p>Loading...</p>}
@@ -79,11 +41,8 @@ function App() {
           {!events.length && !loading && <p>No events captured yet.</p>}
         </div>
       </section>
-      <footer className="pt-2 text-center text-sm text-slate-500">
-        <p className="m-0">© {new Date().getFullYear()} leafstudiosDot</p>
-      </footer>
-    </main>
+    </>
   );
 }
 
-export default App;
+export default Dashboard;
