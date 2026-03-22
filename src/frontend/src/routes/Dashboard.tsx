@@ -1,6 +1,39 @@
 function Dashboard({ loading, health, events }) {
+  const profile = health?.bot_profile;
+
   return (
     <>
+      {profile && (
+        <section className="mb-4 overflow-hidden rounded-2xl bg-white shadow-[0_8px_28px_rgba(15,28,45,0.08)]">
+          <div className="w-full bg-gradient-to-r from-sky-600 via-blue-600 to-indigo-700 select-none">
+            {profile.banner_url ? (
+              <img src={profile.banner_url} alt="Profile Header" className="block h-auto w-full" draggable={false} />
+            ) : (
+              <div className="aspect-[16/5] w-full" />
+            )}
+          </div>
+
+          <div className="px-5 pb-5">
+            <div className="-mt-10 select-none">
+              <div className="h-20 w-20 overflow-hidden rounded-full border-4 border-white bg-slate-200 shadow-sm">
+                {profile.avatar_url ? (
+                  <img src={profile.avatar_url} alt="Profile Avatar" className="h-full w-full object-cover" draggable={false} />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center text-lg font-bold text-slate-500">
+                    {String(profile.username || "M").charAt(0).toUpperCase()}
+                  </div>
+                )}
+              </div>
+
+              <div className="pt-3 flex">
+                <h2 className="m-0 text-2xl font-semibold text-slate-900">{profile.username}</h2>
+                <p className="m-0 text-slate-500 font-[23px]">#{profile.discriminator || "0000"}</p>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
       <section className="mb-4 rounded-2xl bg-white p-5 shadow-[0_8px_28px_rgba(15,28,45,0.08)]">
         <h2 className="mt-0 text-xl font-semibold text-slate-900">Bot Health</h2>
         {loading && <p>Loading...</p>}

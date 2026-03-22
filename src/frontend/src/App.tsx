@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Route, Routes, useLocation } from "react-router-dom";
 import SideMenu from "./sidemenu";
+
 import Dashboard from "./routes/Dashboard";
 import DangerZone from "./routes/DangerZone";
 import NotFound from "./routes/NotFound";

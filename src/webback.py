@@ -28,6 +28,7 @@ def create_app(frontend_dist: Path, app_id: str | None, bot_state: dict, get_eve
                 "bot_connected": bot_state["connected"],
                 "last_sequence": bot_state["last_sequence"],
                 "app_id": app_id,
+                "bot_profile": bot_state.get("profile"),
             }
         )
 
@@ -46,6 +47,7 @@ def create_app(frontend_dist: Path, app_id: str | None, bot_state: dict, get_eve
                         "bot_connected": bot_state["connected"],
                         "last_sequence": bot_state["last_sequence"],
                         "app_id": app_id,
+                        "bot_profile": bot_state.get("profile"),
                     }
                 )
             )

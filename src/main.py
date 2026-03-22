@@ -16,7 +16,12 @@ ROOT_DIR = Path(__file__).resolve().parent
 DB_PATH = ROOT_DIR / "manubot.db"
 FRONTEND_DIST = ROOT_DIR / "frontend" / "dist"
 API_PORT = int(os.getenv("API_PORT", "6540"))
-BOT_STATE = {"connected": False, "last_sequence": None}
+BOT_STATE = {
+    "connected": False,
+    "last_sequence": None,
+    "app_id": APP_ID,
+    "profile": None,
+}
 
 app = create_app(
     frontend_dist=FRONTEND_DIST,
