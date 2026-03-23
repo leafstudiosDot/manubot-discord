@@ -4,6 +4,7 @@ import asyncio
 import threading
 from pathlib import Path
 from dotenv import load_dotenv
+from accounts import AccountService
 
 from database import (
     get_dm_history,
@@ -22,6 +23,9 @@ from webback import create_app
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 APP_ID = os.getenv("APP_ID")
+SUPERADMIN_USERNAME = os.getenv("SUPERADMIN_USERNAME")
+SUPERADMIN_PASSWORD = os.getenv("SUPERADMIN_PASSWORD")
+SUPERADMIN_PASSWORD_HASH = os.getenv("SUPERADMIN_PASSWORD_HASH")
 
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = ROOT_DIR / "manubot.db"
@@ -57,10 +61,18 @@ BOT_STATE = {
     "guilds": [],
 }
 
+account_service = AccountService(
+    db_path=DB_PATH,
+    superadmin_username=SUPERADMIN_USERNAME or "",
+    superadmin_password=SUPERADMIN_PASSWORD or "",
+    superadmin_password_hash=SUPERADMIN_PASSWORD_HASH,
+)
+
 app = create_app(
     frontend_dist=FRONTEND_DIST,
     app_id=APP_ID,
     bot_state=BOT_STATE,
+    account_service=account_service,
     get_events=lambda limit=25: get_events(DB_PATH, limit=limit),
     get_dm_users=lambda limit_events=300: get_dm_users(DB_PATH, limit_events=limit_events),
     get_dm_history=lambda user_id, limit=120: get_dm_history(DB_PATH, user_id=user_id, limit=limit),
@@ -85,12 +97,21 @@ def run_flask_server():
 
 if __name__ == "__main__":
     if not TOKEN:
-        raise RuntimeError("TOKEN is missing from .env")
+        raise RuntimeError(
+            "TOKEN is missing from .env. TOKEN and SUPERADMIN_USERNAME are required to run the server."
+        )
+
+    if not SUPERADMIN_USERNAME:
+        raise RuntimeError(
+            "SUPERADMIN_USERNAME is missing from .env. TOKEN and SUPERADMIN_USERNAME are required to run the server."
+        )
 
     if not APP_ID:
         print("Warning: APP_ID is missing from .env. Health endpoint will show app_id as null.")
 
     init_db(DB_PATH)
+    account_service.init_db()
+
     print(f"Flask API listening on http://localhost:{API_PORT}")
 
     flask_thread = threading.Thread(target=run_flask_server, daemon=True)

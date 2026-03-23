@@ -541,3 +541,318 @@ def regenerate_db(db_path: Path) -> int:
     conn.close()
 
     return int(deleted_count)
+
+
+def init_account_db(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS panel_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('admin', 'moderator')),
+            permissions_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_panel_accounts_role
+        ON panel_accounts(role)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS panel_sessions (
+            token TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            role TEXT NOT NULL,
+            account_id INTEGER,
+            issued_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked INTEGER NOT NULL DEFAULT 0,
+            revoked_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_panel_sessions_user_role
+        ON panel_sessions(username, role)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_panel_sessions_revoked_expiry
+        ON panel_sessions(revoked, expires_at)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def insert_panel_session(
+    db_path: Path,
+    token: str,
+    username: str,
+    role: str,
+    account_id: int | None,
+    issued_at: str,
+    expires_at: str,
+) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO panel_sessions (token, username, role, account_id, issued_at, expires_at, revoked, revoked_at)
+        VALUES (?, ?, ?, ?, ?, ?, 0, NULL)
+        """,
+        (token, username, role, account_id, issued_at, expires_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_panel_session_by_token(db_path: Path, token: str) -> dict | None:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """
+        SELECT token, username, role, account_id, issued_at, expires_at, revoked
+        FROM panel_sessions
+        WHERE token = ?
+        """,
+        (token,),
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    return {
+        "token": str(row["token"]),
+        "username": str(row["username"]),
+        "role": str(row["role"]),
+        "account_id": row["account_id"],
+        "issued_at": str(row["issued_at"]),
+        "expires_at": str(row["expires_at"]),
+        "revoked": int(row["revoked"] or 0),
+    }
+
+
+def revoke_panel_session_by_token(db_path: Path, token: str, revoked_at: str) -> int:
+    conn = sqlite3.connect(db_path)
+    result = conn.execute(
+        """
+        UPDATE panel_sessions
+        SET revoked = 1, revoked_at = ?
+        WHERE token = ? AND revoked = 0
+        """,
+        (revoked_at, token),
+    )
+    conn.commit()
+    conn.close()
+    return int(result.rowcount or 0)
+
+
+def revoke_panel_sessions_by_username(
+    db_path: Path,
+    username: str,
+    revoked_at: str,
+    exclude_token: str | None = None,
+) -> int:
+    conn = sqlite3.connect(db_path)
+    if exclude_token:
+        result = conn.execute(
+            """
+            UPDATE panel_sessions
+            SET revoked = 1, revoked_at = ?
+            WHERE lower(username) = lower(?) AND revoked = 0 AND token != ?
+            """,
+            (revoked_at, username, exclude_token),
+        )
+    else:
+        result = conn.execute(
+            """
+            UPDATE panel_sessions
+            SET revoked = 1, revoked_at = ?
+            WHERE lower(username) = lower(?) AND revoked = 0
+            """,
+            (revoked_at, username),
+        )
+    conn.commit()
+    conn.close()
+    return int(result.rowcount or 0)
+
+
+def revoke_panel_sessions_by_identity(db_path: Path, username: str, role: str, revoked_at: str) -> int:
+    conn = sqlite3.connect(db_path)
+    result = conn.execute(
+        """
+        UPDATE panel_sessions
+        SET revoked = 1, revoked_at = ?
+        WHERE revoked = 0 AND lower(username) = lower(?) AND role = ?
+        """,
+        (revoked_at, username, role),
+    )
+    conn.commit()
+    conn.close()
+    return int(result.rowcount or 0)
+
+
+def revoke_all_panel_sessions_by_roles(db_path: Path, roles: list[str], revoked_at: str) -> int:
+    if not roles:
+        return 0
+
+    placeholders = ",".join("?" for _ in roles)
+    conn = sqlite3.connect(db_path)
+    result = conn.execute(
+        f"""
+        UPDATE panel_sessions
+        SET revoked = 1, revoked_at = ?
+        WHERE revoked = 0 AND role IN ({placeholders})
+        """,
+        (revoked_at, *roles),
+    )
+    conn.commit()
+    conn.close()
+    return int(result.rowcount or 0)
+
+
+def get_panel_account_by_username(db_path: Path, username: str) -> dict | None:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """
+        SELECT id, username, password_hash, role, permissions_json, created_at, updated_at
+        FROM panel_accounts
+        WHERE lower(username) = lower(?)
+        """,
+        (username,),
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    return {
+        "id": int(row["id"]),
+        "username": str(row["username"]),
+        "password_hash": str(row["password_hash"]),
+        "role": str(row["role"]),
+        "permissions_json": str(row["permissions_json"] or "{}"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def get_panel_account_by_id(db_path: Path, account_id: int) -> dict | None:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """
+        SELECT id, username, password_hash, role, permissions_json, created_at, updated_at
+        FROM panel_accounts
+        WHERE id = ?
+        """,
+        (account_id,),
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    return {
+        "id": int(row["id"]),
+        "username": str(row["username"]),
+        "password_hash": str(row["password_hash"]),
+        "role": str(row["role"]),
+        "permissions_json": str(row["permissions_json"] or "{}"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def list_panel_accounts(db_path: Path) -> list[dict]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT id, username, role, permissions_json, created_at, updated_at
+        FROM panel_accounts
+        ORDER BY role ASC, username ASC
+        """
+    ).fetchall()
+    conn.close()
+
+    result: list[dict] = []
+    for row in rows:
+        result.append(
+            {
+                "id": int(row["id"]),
+                "username": str(row["username"]),
+                "role": str(row["role"]),
+                "permissions_json": str(row["permissions_json"] or "{}"),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        )
+    return result
+
+
+def insert_panel_account(
+    db_path: Path,
+    username: str,
+    password_hash: str,
+    role: str,
+    permissions_json: str,
+    created_at: str,
+    updated_at: str,
+) -> bool:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO panel_accounts (username, password_hash, role, permissions_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (username, password_hash, role, permissions_json, created_at, updated_at),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+
+def update_panel_account_permissions(db_path: Path, account_id: int, permissions_json: str, updated_at: str) -> int:
+    conn = sqlite3.connect(db_path)
+    result = conn.execute(
+        """
+        UPDATE panel_accounts
+        SET permissions_json = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (permissions_json, updated_at, account_id),
+    )
+    conn.commit()
+    conn.close()
+    return int(result.rowcount or 0)
+
+
+def update_panel_account_password(db_path: Path, account_id: int, password_hash: str, updated_at: str) -> int:
+    conn = sqlite3.connect(db_path)
+    result = conn.execute(
+        """
+        UPDATE panel_accounts
+        SET password_hash = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (password_hash, updated_at, account_id),
+    )
+    conn.commit()
+    conn.close()
+    return int(result.rowcount or 0)

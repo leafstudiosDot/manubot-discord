@@ -44,7 +44,7 @@ function buildWsUrl(path: string) {
     return `${protocol}://${window.location.host}${path}`;
 }
 
-function DirectMessages({ loading }) {
+function DirectMessages({ loading, canRead, canSend, canDelete }) {
     const [users, setUsers] = useState<DmUser[]>([]);
     const [view, setView] = useState<"list" | "compose">("list");
     const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
@@ -68,6 +68,12 @@ function DirectMessages({ loading }) {
     const selectedUser = visibleUsers.find((user) => user.user_id === selectedUserId) || null;
 
     useEffect(() => {
+        if (!canRead) {
+            setFetching(false);
+            setUsers([]);
+            return;
+        }
+
         let isCancelled = false;
         let ws: WebSocket | null = null;
         let reconnectHandle: number | null = null;
@@ -134,7 +140,7 @@ function DirectMessages({ loading }) {
                 ws.close();
             }
         };
-    }, []);
+    }, [canRead]);
 
     const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         const picked = event.target.files ? Array.from(event.target.files) : [];
@@ -142,6 +148,11 @@ function DirectMessages({ loading }) {
     };
 
     const handleSendMessage = async () => {
+        if (!canSend) {
+            setSendError("You do not have permission to send direct messages");
+            return;
+        }
+
         if (!selectedUser) {
             setSendError("No user selected");
             return;
@@ -190,6 +201,10 @@ function DirectMessages({ loading }) {
     };
 
     useEffect(() => {
+        if (!canRead) {
+            return;
+        }
+
         if (view !== "compose" || !selectedUserId) {
             return;
         }
@@ -258,12 +273,26 @@ function DirectMessages({ loading }) {
                 ws.close();
             }
         };
-    }, [selectedUserId, view]);
+    }, [selectedUserId, view, canRead]);
 
     const openDeletePrompt = (message: DmHistoryMessage) => {
+        if (!canDelete) {
+            setSendError("You do not have permission to delete direct messages");
+            return;
+        }
+
         setPendingDeleteMessage(message);
         setDeletePromptOpen(true);
     };
+
+    if (!canRead) {
+        return (
+            <section className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-5 shadow-[0_8px_28px_rgba(15,28,45,0.08)]">
+                <h2 className="m-0 text-xl font-semibold text-amber-900">Direct Messages</h2>
+                <p className="mb-0 mt-2 text-sm text-amber-800">You do not have permission to access direct messages.</p>
+            </section>
+        );
+    }
 
     const handleDeleteMessage = async () => {
         if (!pendingDeleteMessage) {
@@ -427,17 +456,19 @@ function DirectMessages({ loading }) {
                                                                         </p>
                                                                     </div>
                                                                     <div className="relative">
-                                                                        <button
-                                                                            type="button"
-                                                                            onClick={() =>
-                                                                                setActiveMenuMessageId((current) =>
-                                                                                    current === message.message_id ? null : message.message_id
-                                                                                )
-                                                                            }
-                                                                            className="rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-700 hover:bg-slate-50"
-                                                                        >
-                                                                            More
-                                                                        </button>
+                                                                        {canDelete && (
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() =>
+                                                                                    setActiveMenuMessageId((current) =>
+                                                                                        current === message.message_id ? null : message.message_id
+                                                                                    )
+                                                                                }
+                                                                                className="rounded border border-slate-300 px-2 py-0.5 text-xs text-slate-700 hover:bg-slate-50"
+                                                                            >
+                                                                                More
+                                                                            </button>
+                                                                        )}
 
                                                                         {activeMenuMessageId === message.message_id && isBotMessage && (
                                                                             <div className="absolute right-0 z-10 mt-1 min-w-24 rounded-md border border-slate-200 bg-white p-1 shadow">
@@ -484,40 +515,44 @@ function DirectMessages({ loading }) {
                                             )}
                                         </div>
 
-                                        <div className="mb-3">
-                                            <label className="mb-1 block text-sm font-semibold text-slate-900" htmlFor="dm-content">
-                                                Message
-                                            </label>
-                                            <textarea
-                                                id="dm-content"
-                                                value={messageText}
-                                                onChange={(event) => setMessageText(event.target.value)}
-                                                rows={5}
-                                                className="w-full resize-y rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-slate-400 focus:border-slate-400 focus:ring-2"
-                                                placeholder="Write a direct message..."
-                                            />
-                                        </div>
+                                        {canSend && (
+                                            <>
+                                                <div className="mb-3">
+                                                    <label className="mb-1 block text-sm font-semibold text-slate-900" htmlFor="dm-content">
+                                                        Message
+                                                    </label>
+                                                    <textarea
+                                                        id="dm-content"
+                                                        value={messageText}
+                                                        onChange={(event) => setMessageText(event.target.value)}
+                                                        rows={5}
+                                                        className="w-full resize-y rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-slate-400 focus:border-slate-400 focus:ring-2"
+                                                        placeholder="Write a direct message..."
+                                                    />
+                                                </div>
 
-                                        <div className="mb-3">
-                                            <label className="mb-1 block text-sm font-semibold text-slate-900" htmlFor="dm-files">
-                                                Media / Files
-                                            </label>
-                                            <input
-                                                ref={fileInputRef}
-                                                id="dm-files"
-                                                type="file"
-                                                multiple
-                                                onChange={handleFileChange}
-                                                className="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
-                                            />
-                                            {files.length > 0 && (
-                                                <ul className="mb-0 mt-2 list-disc pl-5 text-xs text-slate-600">
-                                                    {files.map((file) => (
-                                                        <li key={`${file.name}-${file.size}`}>{file.name}</li>
-                                                    ))}
-                                                </ul>
-                                            )}
-                                        </div>
+                                                <div className="mb-3">
+                                                    <label className="mb-1 block text-sm font-semibold text-slate-900" htmlFor="dm-files">
+                                                        Media / Files
+                                                    </label>
+                                                    <input
+                                                        ref={fileInputRef}
+                                                        id="dm-files"
+                                                        type="file"
+                                                        multiple
+                                                        onChange={handleFileChange}
+                                                        className="block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+                                                    />
+                                                    {files.length > 0 && (
+                                                        <ul className="mb-0 mt-2 list-disc pl-5 text-xs text-slate-600">
+                                                            {files.map((file) => (
+                                                                <li key={`${file.name}-${file.size}`}>{file.name}</li>
+                                                            ))}
+                                                        </ul>
+                                                    )}
+                                                </div>
+                                            </>
+                                        )}
 
                                         {sendError && (
                                             <p className="mb-3 mt-0 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{sendError}</p>
@@ -529,14 +564,18 @@ function DirectMessages({ loading }) {
                                             </p>
                                         )}
 
-                                        <button
-                                            type="button"
-                                            onClick={handleSendMessage}
-                                            disabled={sending}
-                                            className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
-                                        >
-                                            {sending ? "Sending..." : "Send DM"}
-                                        </button>
+                                        {canSend ? (
+                                            <button
+                                                type="button"
+                                                onClick={handleSendMessage}
+                                                disabled={sending}
+                                                className="rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                                            >
+                                                {sending ? "Sending..." : "Send DM"}
+                                            </button>
+                                        ) : (
+                                            <p className="m-0 text-sm text-slate-600">You can view history but cannot send messages.</p>
+                                        )}
                                     </>
                                 ) : (
                                     <p className="m-0 text-sm text-slate-600">This user is no longer available in the list.</p>

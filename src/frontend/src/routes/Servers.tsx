@@ -81,7 +81,7 @@ function decodePermissions(permissions: string | null): string[] {
     return PERMISSION_FLAGS.filter((flag) => (value & flag.bit) === flag.bit).map((flag) => flag.label);
 }
 
-function Servers({ loading }) {
+function Servers({ loading, canView }) {
     const [servers, setServers] = useState<Server[]>([]);
     const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
     const [view, setView] = useState<"list" | "detail">("list");
@@ -92,6 +92,12 @@ function Servers({ loading }) {
     const selectedPermissions = decodePermissions(selectedServer?.permissions || null);
 
     useEffect(() => {
+        if (!canView) {
+            setFetching(false);
+            setServers([]);
+            return;
+        }
+
         let isCancelled = false;
 
         const loadServers = async () => {
@@ -138,7 +144,16 @@ function Servers({ loading }) {
             isCancelled = true;
             window.clearInterval(interval);
         };
-    }, []);
+    }, [canView]);
+
+    if (!canView) {
+        return (
+            <section className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-5 shadow-[0_8px_28px_rgba(15,28,45,0.08)]">
+                <h2 className="m-0 text-xl font-semibold text-amber-900">Server List</h2>
+                <p className="mb-0 mt-2 text-sm text-amber-800">You do not have permission to view servers.</p>
+            </section>
+        );
+    }
 
     return (
         <>
