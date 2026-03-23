@@ -30,7 +30,9 @@ def create_app(
     delete_dm,
     regenerate_db,
 ):
-    app = Flask(__name__, static_folder=str(frontend_dist), static_url_path="")
+    # Avoid mounting Flask's static route at "/" because it can intercept
+    # client-side routes (e.g. /servers) and return 404 before SPA fallback.
+    app = Flask(__name__)
     sock = Sock(app)
 
     @app.get("/api/health")
@@ -236,6 +238,9 @@ def create_app(
     @app.route("/", defaults={"path": ""})
     @app.route("/<path:path>")
     def serve_frontend(path):
+        if path.startswith("api/") or path.startswith("ws/"):
+            return jsonify({"status": "error", "message": "Not found"}), 404
+
         if frontend_dist.exists():
             asset_path = frontend_dist / path
             if path and asset_path.exists() and asset_path.is_file():
