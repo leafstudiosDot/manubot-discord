@@ -58,6 +58,19 @@ function SideMenu({ isOpen, onNavigate }: SideMenuProps) {
             Servers
           </NavLink>
           <NavLink
+            to="/accounts"
+            onClick={onNavigate}
+            end
+            className={({ isActive }) =>
+              `${navItemBase} ${isActive
+                ? "bg-gray-600 text-white"
+                : "bg-gray-500 text-white hover:bg-gray-600"
+              }`
+            }
+          >
+            Accounts
+          </NavLink>
+          <NavLink
             to="/danger-zone"
             onClick={onNavigate}
             className={({ isActive }) =>

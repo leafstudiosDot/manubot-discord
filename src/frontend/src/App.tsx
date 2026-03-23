@@ -5,6 +5,7 @@ import SideMenu from "./sidemenu";
 import Dashboard from "./routes/Dashboard";
 import DirectMessages from "./routes/DirectMessages";
 import Servers from "./routes/Servers";
+import Accounts from "./routes/Accounts";
 import DangerZone from "./routes/DangerZone";
 import NotFound from "./routes/NotFound";
 import { APP_VERSION } from "./version";
@@ -161,6 +162,7 @@ function App() {
             <Route path="/servers" element={<Servers loading={loading} />} />
             <Route path="/danger-zone" element={<DangerZone />} />
             <Route path="/direct-messages" element={<DirectMessages loading={loading} />} />
+            <Route path="/accounts" element={<Accounts />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
 
