@@ -16,13 +16,15 @@ This project now includes:
 - `src/database.py`: SQLite schema setup and event read/write helpers
 - `src/frontend/`: React + Vite dashboard app
 
-## 1) Install backend dependencies
+## Setup
+
+### 1. Install backend dependencies
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-## 2) Development mode
+### 2. Development mode
 
 Run backend (Discord bot + Flask API):
 
@@ -40,7 +42,7 @@ npm run dev
 
 Open: `http://localhost:5173`
 
-## 3) Production build mode
+### 3. Production build mode
 
 Build frontend once:
 
@@ -59,7 +61,7 @@ python src/main.py
 Flask will serve the built React app from `src/frontend/dist`
 - `http://localhost:6540/` (dashboard)
 
-## 4) Docker (single image)
+### Docker (single image)
 
 Build a production image (frontend is built inside Docker):
 
@@ -75,7 +77,7 @@ docker run --rm -p 6540:6540 --env-file .env manubot:latest
 
 Open: `http://localhost:6540`
 
-## 5) Docker Compose (recommended)
+### Docker Compose
 
 Compose uses:
 - `.env` for secrets/config (`TOKEN`, `APP_ID`, optional `API_PORT`)
@@ -99,7 +101,7 @@ Stop:
 docker compose down
 ```
 
-## Environment variables
+### Environment variables
 
 Use your `.env` file:
 
@@ -112,7 +114,7 @@ DB_PATH=src/manubot.db
 
 `DB_PATH` is optional for local non-Docker runs.
 
-## `.env` in Docker
+### `.env` in Docker
 
 - Do not copy `.env` into the image.
 - Keep `.env` on host and pass it at runtime:
@@ -120,14 +122,14 @@ DB_PATH=src/manubot.db
   - or `env_file: .env` in Compose (already configured in `docker-compose.yml`)
 - If you use Compose and also set values in `environment:`, those explicit `environment` values win over `env_file` values for same keys.
 
-## Version bump automation
+### Version bump automation
 
 Frontend UI version is now generated from `src/frontend/package.json` during Vite build, so there are no hardcoded `v0.0.x` strings to update in React files.
 
 From `src/frontend/`:
 
 ```powershell
-# Increment semver locally (no git tag created by npm)
+# Increment version locally (no git tag created by npm)
 npm run version:patch
 npm run version:minor
 npm run version:major
