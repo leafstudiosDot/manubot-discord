@@ -89,24 +89,22 @@ function DangerZone({ canRegenerate, canRevokeAll, canRevokeAllGlobal, onSession
           Warning: This section contains actions that may have irreversible consequences. Proceed with caution and ensure you understand the implications of any action taken here.
         </p>
 
-        <div className="rounded-xl border border-rose-300 bg-white p-4">
-          <h3 className="m-0 text-base font-semibold text-slate-900">Regenerate manubot.db</h3>
-          <p className="mb-4 mt-2 text-sm text-slate-700">
-            This will delete all stored gateway events from the SQLite database.
-          </p>
-          <button
-            type="button"
-            onClick={() => setOpenPrompt(true)}
-            disabled={!canRegenerate}
-            className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:bg-rose-300"
-          >
-            Regenerate Database
-          </button>
-          {!canRegenerate && (
-            <p className="mt-3 text-sm text-rose-700">You do not have permission to regenerate the database.</p>
-          )}
-          {result && <p className="mt-3 text-sm text-slate-700">{result}</p>}
-        </div>
+        {canRegenerate && (
+          <div className="rounded-xl border border-rose-300 bg-white p-4">
+            <h3 className="m-0 text-base font-semibold text-slate-900">Regenerate manubot.db</h3>
+            <p className="mb-4 mt-2 text-sm text-slate-700">
+              This will delete all stored gateway events from the SQLite database.
+            </p>
+            <button
+              type="button"
+              onClick={() => setOpenPrompt(true)}
+              className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700"
+            >
+              Regenerate Database
+            </button>
+            {result && <p className="mt-3 text-sm text-slate-700">{result}</p>}
+          </div>
+        )}
 
         <div className="mt-4 rounded-xl border border-amber-300 bg-white p-4">
           <h3 className="m-0 text-base font-semibold text-slate-900">Revoke My Sessions</h3>
