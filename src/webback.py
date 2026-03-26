@@ -3,13 +3,13 @@ import sys
 import threading
 import time
 from pathlib import Path
+import json
 
 from flask import Flask, g, jsonify, request, send_from_directory
 from flask_sock import Sock
 
 from accounts import (
     PERMISSION_ACCOUNTS_VIEW,
-    PERMISSION_DATABASE_REGENERATE,
     PERMISSION_DIRECT_MESSAGES_DELETE,
     PERMISSION_DIRECT_MESSAGES_READ,
     PERMISSION_DIRECT_MESSAGES_SEND,
@@ -19,6 +19,7 @@ from accounts import (
     ROLE_MODERATOR,
     ROLE_SUPERADMIN,
 )
+from wsback import register_ws_routes
 
 
 def _restart_current_process() -> None:
@@ -72,6 +73,18 @@ def create_app(
             return None
 
         return session
+
+    register_ws_routes(
+        sock=sock,
+        app_id=app_id,
+        bot_state=bot_state,
+        get_events=get_events,
+        get_dm_users=get_dm_users,
+        get_dm_history=get_dm_history,
+        require_ws_auth=_require_ws_auth,
+        permission_events_view=PERMISSION_EVENTS_VIEW,
+        permission_direct_messages_read=PERMISSION_DIRECT_MESSAGES_READ,
+    )
 
     @app.post("/api/auth/login")
     def api_auth_login():
@@ -358,87 +371,6 @@ def create_app(
                 "servers": guilds,
             }
         )
-
-    @sock.route("/ws/health")
-    def ws_health(ws):
-        while True:
-            ws.send(
-                json.dumps(
-                    {
-                        "status": "ok",
-                        "bot_connected": bot_state["connected"],
-                        "last_sequence": bot_state["last_sequence"],
-                        "app_id": app_id,
-                        "bot_profile": bot_state.get("profile"),
-                    }
-                )
-            )
-            time.sleep(2)
-
-    @sock.route("/ws/events")
-    def ws_events(ws):
-        query = parse_qs(ws.environ.get("QUERY_STRING", ""))
-        try:
-            requested_limit = int(query.get("limit", [20])[0])
-        except (TypeError, ValueError):
-            requested_limit = 20
-
-        limit = max(1, min(requested_limit, 20))
-
-        while True:
-            ws.send(json.dumps(get_events(limit=limit)))
-            time.sleep(1)
-
-    @sock.route("/ws/direct-messages/users")
-    def ws_dm_users(ws):
-        query = parse_qs(ws.environ.get("QUERY_STRING", ""))
-        try:
-            requested_limit = int(query.get("limit", [300])[0])
-        except (TypeError, ValueError):
-            requested_limit = 300
-
-        limit = max(1, min(requested_limit, 1000))
-
-        while True:
-            users = get_dm_users(limit_events=limit)
-            ws.send(
-                json.dumps(
-                    {
-                        "count": len(users),
-                        "users": users,
-                    }
-                )
-            )
-            time.sleep(2)
-
-    @sock.route("/ws/direct-messages/history")
-    def ws_dm_history(ws):
-        query = parse_qs(ws.environ.get("QUERY_STRING", ""))
-        user_id = (query.get("user_id", [""])[0] or "").strip()
-
-        try:
-            requested_limit = int(query.get("limit", [150])[0])
-        except (TypeError, ValueError):
-            requested_limit = 150
-
-        limit = max(1, min(requested_limit, 300))
-
-        if not user_id:
-            ws.send(json.dumps({"status": "error", "message": "user_id is required", "messages": []}))
-            return
-
-        while True:
-            messages = get_dm_history(user_id=user_id, limit=limit)
-            ws.send(
-                json.dumps(
-                    {
-                        "status": "ok",
-                        "count": len(messages),
-                        "messages": messages,
-                    }
-                )
-            )
-            time.sleep(2)
 
     @app.delete("/api/database/regenerate")
     def api_regenerate_db():

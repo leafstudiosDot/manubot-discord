@@ -10,9 +10,15 @@ def register_ws_routes(
     get_events,
     get_dm_users,
     get_dm_history,
+    require_ws_auth,
+    permission_events_view: str,
+    permission_direct_messages_read: str,
 ):
     @sock.route("/ws/health")
     def ws_health(ws):
+        if not require_ws_auth(ws):
+            return
+
         while True:
             ws.send(
                 json.dumps(
@@ -29,6 +35,9 @@ def register_ws_routes(
 
     @sock.route("/ws/events")
     def ws_events(ws):
+        if not require_ws_auth(ws, permission=permission_events_view):
+            return
+
         query = parse_qs(ws.environ.get("QUERY_STRING", ""))
         try:
             requested_limit = int(query.get("limit", [20])[0])
@@ -43,6 +52,9 @@ def register_ws_routes(
 
     @sock.route("/ws/direct-messages/users")
     def ws_dm_users(ws):
+        if not require_ws_auth(ws, permission=permission_direct_messages_read):
+            return
+
         query = parse_qs(ws.environ.get("QUERY_STRING", ""))
         try:
             requested_limit = int(query.get("limit", [300])[0])
@@ -65,6 +77,9 @@ def register_ws_routes(
 
     @sock.route("/ws/direct-messages/history")
     def ws_dm_history(ws):
+        if not require_ws_auth(ws, permission=permission_direct_messages_read):
+            return
+
         query = parse_qs(ws.environ.get("QUERY_STRING", ""))
         user_id = (query.get("user_id", [""])[0] or "").strip()
 
