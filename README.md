@@ -110,9 +110,18 @@ TOKEN=your_discord_bot_token
 APP_ID=your_discord_application_id
 API_PORT=6540
 DB_PATH=src/manubot.db
+SUPERADMIN_USERNAME=superadmin
+SUPERADMIN_PASSWORD=change_me_now
+# Optional: bcrypt hash version of superadmin password.
+# If set, this takes priority over SUPERADMIN_PASSWORD.
+# SUPERADMIN_PASSWORD_HASH=$2b$12$...
 ```
 
 `DB_PATH` is optional for local non-Docker runs.
+
+`TOKEN` and `SUPERADMIN_USERNAME` are required to run the server.
+
+For superadmin login itself, set either `SUPERADMIN_PASSWORD` or `SUPERADMIN_PASSWORD_HASH`.
 
 ### `.env` in Docker
 

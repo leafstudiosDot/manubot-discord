@@ -4,10 +4,21 @@ import threading
 import time
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, request, send_from_directory
 from flask_sock import Sock
 
-from wsback import register_ws_routes
+from accounts import (
+    PERMISSION_ACCOUNTS_VIEW,
+    PERMISSION_DATABASE_REGENERATE,
+    PERMISSION_DIRECT_MESSAGES_DELETE,
+    PERMISSION_DIRECT_MESSAGES_READ,
+    PERMISSION_DIRECT_MESSAGES_SEND,
+    PERMISSION_EVENTS_VIEW,
+    PERMISSION_SERVERS_VIEW,
+    ROLE_ADMIN,
+    ROLE_MODERATOR,
+    ROLE_SUPERADMIN,
+)
 
 
 def _restart_current_process() -> None:
@@ -20,6 +31,7 @@ def create_app(
     frontend_dist: Path,
     app_id: str | None,
     bot_state: dict,
+    account_service,
     get_events,
     get_dm_users,
     get_dm_history,
@@ -35,17 +47,193 @@ def create_app(
     app = Flask(__name__)
     sock = Sock(app)
 
-    register_ws_routes(
-        sock=sock,
-        app_id=app_id,
-        bot_state=bot_state,
-        get_events=get_events,
-        get_dm_users=get_dm_users,
-        get_dm_history=get_dm_history,
-    )
+    def _require_auth(permission: str | None = None, roles: tuple[str, ...] | None = None):
+        session = account_service.authenticate_request(request)
+        if not session:
+            return None, jsonify({"status": "error", "message": "Authentication required"}), 401
+
+        if roles and session.get("role") not in roles:
+            return None, jsonify({"status": "error", "message": "Forbidden"}), 403
+
+        if permission and not account_service.has_permission(session, permission):
+            return None, jsonify({"status": "error", "message": "Forbidden"}), 403
+
+        g.panel_session = session
+        return session, None, None
+
+    def _require_ws_auth(ws, permission: str | None = None):
+        session = account_service.authenticate_ws_environ(ws.environ)
+        if not session:
+            ws.send(json.dumps({"status": "error", "message": "Authentication required"}))
+            return None
+
+        if permission and not account_service.has_permission(session, permission):
+            ws.send(json.dumps({"status": "error", "message": "Forbidden"}))
+            return None
+
+        return session
+
+    @app.post("/api/auth/login")
+    def api_auth_login():
+        payload = request.get_json(silent=True) or {}
+        username = (payload.get("username") or "").strip()
+        password = payload.get("password") or ""
+
+        session, err = account_service.login(username=username, password=password)
+        if err or not session:
+            return jsonify({"status": "error", "message": err or "Invalid credentials"}), 401
+
+        response = jsonify(
+            {
+                "status": "ok",
+                "session": account_service.session_public(session),
+            }
+        )
+        account_service.add_session_cookie(response, session)
+        return response
+
+    @app.post("/api/auth/logout")
+    def api_auth_logout():
+        account_service.logout(request)
+        response = jsonify({"status": "ok"})
+        account_service.clear_session_cookie(response)
+        return response
+
+    @app.get("/api/auth/session")
+    def api_auth_session():
+        session, err_response, err_code = _require_auth()
+        if not session:
+            return err_response, err_code
+
+        return jsonify(
+            {
+                "status": "ok",
+                "session": account_service.session_public(session),
+            }
+        )
+
+    @app.get("/api/accounts")
+    def api_accounts_list():
+        session, err_response, err_code = _require_auth(permission=PERMISSION_ACCOUNTS_VIEW)
+        if not session:
+            return err_response, err_code
+
+        accounts = account_service.list_accounts()
+        return jsonify({"status": "ok", "accounts": accounts})
+
+    @app.post("/api/accounts")
+    def api_accounts_create():
+        session, err_response, err_code = _require_auth(roles=(ROLE_SUPERADMIN,))
+        if not session:
+            return err_response, err_code
+
+        payload = request.get_json(silent=True) or {}
+        created, err = account_service.create_account(
+            actor_session=session,
+            username=payload.get("username") or "",
+            password=payload.get("password") or "",
+            role=payload.get("role") or "",
+        )
+        if err:
+            return jsonify({"status": "error", "message": err}), 400
+
+        return jsonify({"status": "ok", "account": created}), 201
+
+    @app.patch("/api/accounts/<int:account_id>/permissions")
+    def api_accounts_update_permissions(account_id: int):
+        session, err_response, err_code = _require_auth(roles=(ROLE_SUPERADMIN, ROLE_ADMIN))
+        if not session:
+            return err_response, err_code
+
+        payload = request.get_json(silent=True) or {}
+        updated, err = account_service.update_moderator_permissions(
+            actor_session=session,
+            account_id=account_id,
+            permissions=payload.get("permissions") or {},
+        )
+        if err:
+            return jsonify({"status": "error", "message": err}), 400
+
+        return jsonify({"status": "ok", "account": updated})
+
+    @app.post("/api/accounts/change-own-password")
+    def api_accounts_change_own_password():
+        session, err_response, err_code = _require_auth()
+        if not session:
+            return err_response, err_code
+
+        payload = request.get_json(silent=True) or {}
+        updated, err = account_service.change_own_password(
+            actor_session=session,
+            current_password=payload.get("current_password") or "",
+            new_password=payload.get("new_password") or "",
+        )
+        if err:
+            status_code = 403 if "Only admin and moderator" in err else 400
+            return jsonify({"status": "error", "message": err}), status_code
+
+        return jsonify({"status": "ok", "account": updated})
+
+    @app.post("/api/accounts/<int:account_id>/password")
+    def api_accounts_set_password(account_id: int):
+        session, err_response, err_code = _require_auth(roles=(ROLE_SUPERADMIN,))
+        if not session:
+            return err_response, err_code
+
+        payload = request.get_json(silent=True) or {}
+        updated, err = account_service.superadmin_set_account_password(
+            actor_session=session,
+            account_id=account_id,
+            new_password=payload.get("new_password") or "",
+        )
+        if err:
+            return jsonify({"status": "error", "message": err}), 400
+
+        return jsonify({"status": "ok", "account": updated})
+
+    @app.post("/api/sessions/revoke-all")
+    def api_revoke_all_sessions():
+        session, err_response, err_code = _require_auth()
+        if not session:
+            return err_response, err_code
+
+        revoked_count = account_service.revoke_sessions_for_identity(
+            username=str(session.get("username") or ""),
+            role=str(session.get("role") or ""),
+        )
+        response = jsonify(
+            {
+                "status": "ok",
+                "revoked_count": revoked_count,
+                "logged_out": True,
+            }
+        )
+        account_service.clear_session_cookie(response)
+        return response
+
+    @app.post("/api/sessions/revoke-all-global")
+    def api_revoke_all_sessions_global():
+        session, err_response, err_code = _require_auth(roles=(ROLE_SUPERADMIN,))
+        if not session:
+            return err_response, err_code
+
+        revoked_count = account_service.revoke_all_sessions()
+        response = jsonify(
+            {
+                "status": "ok",
+                "revoked_count": revoked_count,
+                "logged_out": True,
+            }
+        )
+        account_service.clear_session_cookie(response)
+        return response
 
     @app.get("/api/health")
     def api_health():
+        session, err_response, err_code = _require_auth()
+        if not session:
+            return err_response, err_code
+
         return jsonify(
             {
                 "status": "ok",
@@ -58,11 +246,19 @@ def create_app(
 
     @app.get("/api/events")
     def api_events():
+        session, err_response, err_code = _require_auth(permission=PERMISSION_EVENTS_VIEW)
+        if not session:
+            return err_response, err_code
+
         limit = request.args.get("limit", default=20, type=int)
         return jsonify(get_events(limit=limit))
 
     @app.get("/api/direct-messages/users")
     def api_direct_message_users():
+        session, err_response, err_code = _require_auth(permission=PERMISSION_DIRECT_MESSAGES_READ)
+        if not session:
+            return err_response, err_code
+
         limit = request.args.get("limit", default=300, type=int)
         users = get_dm_users(limit_events=limit)
         return jsonify(
@@ -74,6 +270,10 @@ def create_app(
 
     @app.post("/api/direct-messages/send")
     def api_dm_send():
+        session, err_response, err_code = _require_auth(permission=PERMISSION_DIRECT_MESSAGES_SEND)
+        if not session:
+            return err_response, err_code
+
         user_id = (request.form.get("user_id") or "").strip()
         content = request.form.get("content") or ""
         uploaded_files = request.files.getlist("files")
@@ -105,6 +305,10 @@ def create_app(
 
     @app.get("/api/direct-messages/history")
     def api_dm_history():
+        session, err_response, err_code = _require_auth(permission=PERMISSION_DIRECT_MESSAGES_READ)
+        if not session:
+            return err_response, err_code
+
         user_id = (request.args.get("user_id") or "").strip()
         limit = request.args.get("limit", default=120, type=int)
 
@@ -116,6 +320,10 @@ def create_app(
 
     @app.delete("/api/direct-messages/messages/<message_id>")
     def api_delete_dm(message_id):
+        session, err_response, err_code = _require_auth(permission=PERMISSION_DIRECT_MESSAGES_DELETE)
+        if not session:
+            return err_response, err_code
+
         message = get_dm_message(message_id=message_id)
         if not message:
             return jsonify({"status": "error", "message": "Message not found"}), 404
@@ -139,6 +347,10 @@ def create_app(
 
     @app.get("/api/servers")
     def api_servers():
+        session, err_response, err_code = _require_auth(permission=PERMISSION_SERVERS_VIEW)
+        if not session:
+            return err_response, err_code
+
         guilds = bot_state.get("guilds") or []
         return jsonify(
             {
@@ -147,8 +359,93 @@ def create_app(
             }
         )
 
+    @sock.route("/ws/health")
+    def ws_health(ws):
+        while True:
+            ws.send(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "bot_connected": bot_state["connected"],
+                        "last_sequence": bot_state["last_sequence"],
+                        "app_id": app_id,
+                        "bot_profile": bot_state.get("profile"),
+                    }
+                )
+            )
+            time.sleep(2)
+
+    @sock.route("/ws/events")
+    def ws_events(ws):
+        query = parse_qs(ws.environ.get("QUERY_STRING", ""))
+        try:
+            requested_limit = int(query.get("limit", [20])[0])
+        except (TypeError, ValueError):
+            requested_limit = 20
+
+        limit = max(1, min(requested_limit, 20))
+
+        while True:
+            ws.send(json.dumps(get_events(limit=limit)))
+            time.sleep(1)
+
+    @sock.route("/ws/direct-messages/users")
+    def ws_dm_users(ws):
+        query = parse_qs(ws.environ.get("QUERY_STRING", ""))
+        try:
+            requested_limit = int(query.get("limit", [300])[0])
+        except (TypeError, ValueError):
+            requested_limit = 300
+
+        limit = max(1, min(requested_limit, 1000))
+
+        while True:
+            users = get_dm_users(limit_events=limit)
+            ws.send(
+                json.dumps(
+                    {
+                        "count": len(users),
+                        "users": users,
+                    }
+                )
+            )
+            time.sleep(2)
+
+    @sock.route("/ws/direct-messages/history")
+    def ws_dm_history(ws):
+        query = parse_qs(ws.environ.get("QUERY_STRING", ""))
+        user_id = (query.get("user_id", [""])[0] or "").strip()
+
+        try:
+            requested_limit = int(query.get("limit", [150])[0])
+        except (TypeError, ValueError):
+            requested_limit = 150
+
+        limit = max(1, min(requested_limit, 300))
+
+        if not user_id:
+            ws.send(json.dumps({"status": "error", "message": "user_id is required", "messages": []}))
+            return
+
+        while True:
+            messages = get_dm_history(user_id=user_id, limit=limit)
+            ws.send(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "count": len(messages),
+                        "messages": messages,
+                    }
+                )
+            )
+            time.sleep(2)
+
     @app.delete("/api/database/regenerate")
     def api_regenerate_db():
+        session, err_response, err_code = _require_auth(roles=(ROLE_SUPERADMIN,))
+        if not session:
+            return err_response, err_code
+
         deleted_count = regenerate_db()
 
         restart_thread = threading.Thread(target=_restart_current_process, daemon=True)
