@@ -26,7 +26,7 @@ function SideMenu({
 
   return (
     <aside className={`${wrapperClass} md:static md:block md:w-64 md:shrink-0`}>
-      <div className="h-full rounded-none bg-gray-50 p-4 text-slate-100 shadow-xl md:h-fit md:rounded-2xl">
+      <div className="h-full rounded-none bg-gray-50 p-4 text-slate-100 shadow-xl md:h-fit md:rounded-2xl select-none">
         <p className="mb-4 text-xs text-slate-400">Discord Bot</p>
         <nav className="space-y-2">
           <NavLink

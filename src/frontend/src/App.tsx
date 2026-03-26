@@ -247,8 +247,8 @@ function App() {
     return (
       <main className="mx-auto max-w-md px-4 pb-12 pt-12">
         <section className="rounded-2xl bg-white p-5 shadow-[0_8px_28px_rgba(15,28,45,0.08)]">
-          <h1 className="m-0 text-2xl font-bold text-slate-900">Manubot Control Panel</h1>
-          <p className="mb-0 mt-2 text-slate-600">Checking session...</p>
+          <h1 className="m-0 text-2xl font-bold text-slate-900 select-none">Manubot Control Panel</h1>
+          <p className="mb-0 mt-2 text-slate-600 select-none">Checking session...</p>
         </section>
       </main>
     );
@@ -258,12 +258,12 @@ function App() {
     return (
       <main className="mx-auto max-w-md px-4 pb-12 pt-12">
         <section className="rounded-2xl bg-white p-6 shadow-[0_8px_28px_rgba(15,28,45,0.08)]">
-          <h1 className="m-0 text-2xl font-bold tracking-tight text-slate-900">Manubot Control Panel</h1>
-          <p className="mb-5 mt-2 text-sm text-slate-500">Sign in to continue.</p>
+          <h1 className="m-0 text-2xl font-bold tracking-tight text-slate-900 select-none">Manubot Control Panel</h1>
+          <p className="mb-5 mt-2 text-sm text-slate-500 select-none">Sign in to continue.</p>
 
           <form className="space-y-3" onSubmit={handleLogin}>
             <div>
-              <label htmlFor="username" className="mb-1 block text-sm font-semibold text-slate-800">
+              <label htmlFor="username" className="mb-1 block text-sm font-semibold text-slate-800 select-none">
                 Username
               </label>
               <input
@@ -278,7 +278,7 @@ function App() {
             </div>
 
             <div>
-              <label htmlFor="password" className="mb-1 block text-sm font-semibold text-slate-800">
+              <label htmlFor="password" className="mb-1 block text-sm font-semibold text-slate-800 select-none">
                 Password
               </label>
               <input
@@ -292,8 +292,10 @@ function App() {
               />
             </div>
 
+            <p className="select-none mb-5 mt-2 text-sm text-slate-500">Forgot password? Please contact an administrator.</p>
+
             {loginError && (
-              <p className="m-0 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              <p className="m-0 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 select-none">
                 {loginError}
               </p>
             )}
@@ -301,7 +303,7 @@ function App() {
             <button
               type="submit"
               disabled={loginBusy}
-              className="w-full rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-70"
+              className="w-full rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-70 select-none"
             >
               {loginBusy ? "Signing in..." : "Sign in"}
             </button>
@@ -315,8 +317,8 @@ function App() {
     <main className="mx-auto max-w-6xl px-4 pb-12 pt-8">
       <header className="mb-6 flex items-center justify-between gap-4">
         <div>
-          <h1 className="m-0 text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">Manubot Control Panel</h1>
-          <p className="mt-2 text-slate-500">
+          <h1 className="m-0 text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl select-none">Manubot Control Panel</h1>
+          <p className="mt-2 text-slate-500 select-none">
             {APP_VERSION} • Signed in as <span className="font-semibold text-slate-700">{session.username}</span> ({session.role})
           </p>
         </div>
@@ -324,14 +326,14 @@ function App() {
           <button
             type="button"
             onClick={handleLogout}
-            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100"
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100 select-none"
           >
             Logout
           </button>
           <button
             type="button"
             onClick={() => setIsMenuOpen((value) => !value)}
-            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white md:hidden"
+            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white md:hidden select-none"
           >
             {isMenuOpen ? "Close" : "Menu"}
           </button>
