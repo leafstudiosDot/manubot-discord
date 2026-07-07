@@ -85,11 +85,16 @@ function Servers({ loading, canView }) {
     const [servers, setServers] = useState<Server[]>([]);
     const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
     const [view, setView] = useState<"list" | "detail">("list");
+    const [permissionsExpanded, setPermissionsExpanded] = useState(false);
     const [fetching, setFetching] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
     const selectedServer = servers.find((server) => server.id === selectedServerId) || null;
     const selectedPermissions = decodePermissions(selectedServer?.permissions || null);
+
+    useEffect(() => {
+        setPermissionsExpanded(false);
+    }, [selectedServerId]);
 
     useEffect(() => {
         if (!canView) {
@@ -194,6 +199,7 @@ function Servers({ loading, canView }) {
                                             type="button"
                                             onClick={() => {
                                                 setSelectedServerId(server.id);
+                                                setPermissionsExpanded(false);
                                                 setView("detail");
                                             }}
                                             className="w-full rounded-lg border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-slate-300 hover:bg-white"
@@ -265,12 +271,28 @@ function Servers({ loading, canView }) {
                                                     No decoded permissions found.
                                                 </p>
                                             ) : (
-                                                <ul className="m-0 grid list-none gap-2 p-0 sm:grid-cols-2 xl:grid-cols-3">
-                                                    {selectedPermissions.map((permission) => (
+                                                <ul
+                                                    role="button"
+                                                    tabIndex={0}
+                                                    onClick={() => setPermissionsExpanded((current) => !current)}
+                                                    onKeyDown={(event) => {
+                                                        if (event.key === "Enter" || event.key === " ") {
+                                                            event.preventDefault();
+                                                            setPermissionsExpanded((current) => !current);
+                                                        }
+                                                    }}
+                                                    className="m-0 grid list-none gap-2 p-0 outline-none transition sm:grid-cols-2 xl:grid-cols-3 hover:cursor-pointer"
+                                                >
+                                                    {(permissionsExpanded ? selectedPermissions : selectedPermissions.slice(0, 6)).map((permission) => (
                                                         <li key={permission} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700">
                                                             {permission}
                                                         </li>
                                                     ))}
+                                                    {!permissionsExpanded && selectedPermissions.length > 6 && (
+                                                        <li className="rounded-md border border-dashed border-slate-300 bg-slate-50 px-2 py-1 text-xs text-slate-500 sm:col-span-2 xl:col-span-3">
+                                                            Click to expand and show {selectedPermissions.length - 6} more permissions.
+                                                        </li>
+                                                    )}
                                                 </ul>
                                             )}
                                         </div>
