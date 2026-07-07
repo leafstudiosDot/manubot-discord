@@ -33,6 +33,10 @@ def create_app(
     app_id: str | None,
     bot_state: dict,
     account_service,
+    get_guild_channels,
+    get_mousetrap_config,
+    save_mousetrap_config,
+    get_mousetrap_logs,
     get_events,
     get_dm_users,
     get_dm_history,
@@ -371,6 +375,80 @@ def create_app(
                 "servers": guilds,
             }
         )
+
+    @app.get("/api/servers/<server_id>/channels")
+    def api_server_channels(server_id: str):
+        session, err_response, err_code = _require_auth(permission=PERMISSION_SERVERS_VIEW)
+        if not session:
+            return err_response, err_code
+
+        guilds = bot_state.get("guilds") or []
+        if not any(str(guild.get("id") or "") == server_id for guild in guilds if isinstance(guild, dict)):
+            return jsonify({"status": "error", "message": "Server not found"}), 404
+
+        try:
+            channels = get_guild_channels(server_id=server_id)
+        except Exception as err:
+            return jsonify({"status": "error", "message": str(err)}), 500
+
+        text_channels = []
+        for channel in channels:
+            channel_type = channel.get("type")
+            if channel_type not in (0, 5, 10, 11, 12):
+                continue
+
+            text_channels.append(
+                {
+                    "id": str(channel.get("id") or ""),
+                    "name": str(channel.get("name") or "unknown-channel"),
+                    "type": channel_type,
+                    "parent_id": channel.get("parent_id"),
+                }
+            )
+
+        text_channels.sort(key=lambda item: item["name"].lower())
+        return jsonify({"status": "ok", "channels": text_channels})
+
+    @app.get("/api/servers/<server_id>/mousetrap")
+    def api_server_mousetrap(server_id: str):
+        session, err_response, err_code = _require_auth(permission=PERMISSION_SERVERS_VIEW)
+        if not session:
+            return err_response, err_code
+
+        config = get_mousetrap_config(server_id)
+        return jsonify({"status": "ok", "config": config})
+
+    @app.post("/api/servers/<server_id>/mousetrap")
+    def api_server_mousetrap_save(server_id: str):
+        session, err_response, err_code = _require_auth(permission=PERMISSION_SERVERS_VIEW)
+        if not session:
+            return err_response, err_code
+
+        payload = request.get_json(silent=True) or {}
+        channel_id = str(payload.get("channel_id") or "").strip()
+
+        try:
+            config = save_mousetrap_config(server_id, channel_id if channel_id and channel_id != "none" else None)
+        except Exception as err:
+            return jsonify({"status": "error", "message": str(err)}), 500
+
+        return jsonify({"status": "ok", "config": config})
+
+    @app.get("/api/servers/<server_id>/mousetrap/logs")
+    def api_server_mousetrap_logs(server_id: str):
+        session, err_response, err_code = _require_auth(permission=PERMISSION_SERVERS_VIEW)
+        if not session:
+            return err_response, err_code
+
+        limit = request.args.get("limit", default=100, type=int)
+        channel_id = (request.args.get("channel_id") or "").strip() or None
+
+        try:
+            data = get_mousetrap_logs(server_id, channel_id=channel_id, limit=limit)
+        except Exception as err:
+            return jsonify({"status": "error", "message": str(err)}), 500
+
+        return jsonify(data)
 
     @app.delete("/api/database/regenerate")
     def api_regenerate_db():

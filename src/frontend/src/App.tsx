@@ -5,6 +5,7 @@ import SideMenu from "./sidemenu";
 import Dashboard from "./routes/Dashboard";
 import DirectMessages from "./routes/DirectMessages";
 import Servers from "./routes/Servers";
+import MouseTrap from "./routes/MouseTrap";
 import Accounts from "./routes/Accounts";
 import DangerZone from "./routes/DangerZone";
 import NotFound from "./routes/NotFound";
@@ -368,6 +369,10 @@ function App() {
             <Route
               path="/servers"
               element={<Servers loading={loading} canView={hasPermission("servers_view")} />}
+            />
+            <Route
+              path="/servers/:serverId/mousetrap"
+              element={<MouseTrap />}
             />
             <Route
               path="/danger-zone"

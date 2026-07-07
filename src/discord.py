@@ -86,6 +86,42 @@ async def refresh_bot_profile(token: str, bot_state: dict) -> None:
         )
 
     guilds.sort(key=lambda item: item["name"].lower())
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        for guild in guilds:
+            guild_id = guild.get("id")
+            if not guild_id:
+                guild["channels"] = []
+                continue
+
+            try:
+                async with session.get(f"{DISCORD_API_BASE}/guilds/{guild_id}/channels") as response:
+                    if response.status != 200:
+                        guild["channels"] = []
+                        continue
+
+                    channel_data = await response.json()
+            except Exception:
+                guild["channels"] = []
+                continue
+
+            if not isinstance(channel_data, list):
+                guild["channels"] = []
+                continue
+
+            guild["channels"] = [
+                {
+                    "id": str(channel.get("id") or ""),
+                    "name": str(channel.get("name") or "unknown-channel"),
+                    "type": channel.get("type"),
+                    "parent_id": channel.get("parent_id"),
+                }
+                for channel in channel_data
+                if isinstance(channel, dict) and channel.get("type") in (0, 5, 10, 11, 12)
+            ]
+
+            guild["channels"].sort(key=lambda item: item["name"].lower())
+
     bot_state["guilds"] = guilds
 
 
@@ -106,7 +142,7 @@ async def heartbeat(ws, interval):
         await ws.send(json.dumps({"op": 1, "d": None}))
 
 
-async def run(token: str, bot_state: dict, save_event):
+async def run(token: str, bot_state: dict, save_event, handle_guild_message=None):
     activity_state = str(bot_state.get("version") or "v0.0.0")
 
     async with websockets.connect(GATEWAY_URL) as ws:
@@ -166,14 +202,22 @@ async def run(token: str, bot_state: dict, save_event):
             if event_type != "OP_11":
                 print(f"[Gateway] {event_type} seq={sequence}")
 
+            if event_type == "MESSAGE_CREATE" and handle_guild_message:
+                data = payload.get("d") or {}
+                if isinstance(data, dict) and data.get("guild_id") is not None:
+                    try:
+                        await handle_guild_message(payload)
+                    except Exception as err:
+                        print(f"MouseTrap handling failed: {err}")
+
             if dm_event(event_type, payload):
                 save_event(event_type, sequence, payload)
 
 
-async def runbot(token: str, bot_state: dict, save_event):
+async def runbot(token: str, bot_state: dict, save_event, handle_guild_message=None):
     while True:
         try:
-            await run(token=token, bot_state=bot_state, save_event=save_event)
+            await run(token=token, bot_state=bot_state, save_event=save_event, handle_guild_message=handle_guild_message)
         except Exception as err:
             bot_state["connected"] = False
             print(f"Discord connection dropped: {err}")
@@ -285,3 +329,56 @@ async def delete_dm(token: str, channel_id: str, message_id: str) -> None:
 
                 error_message = payload.get("message") if isinstance(payload, dict) else None
                 raise RuntimeError(error_message or f"Failed to delete message (status {response.status})")
+
+
+async def edit_discord_message(token: str, channel_id: str, message_id: str, payload: dict) -> dict:
+    if not token:
+        raise RuntimeError("token is required")
+    if not channel_id or not message_id:
+        raise RuntimeError("channel_id and message_id are required")
+
+    headers = {"Authorization": f"Bot {token}"}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        async with session.patch(
+            f"{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}",
+            json=payload,
+        ) as response:
+            raw = await response.text()
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                data = {"raw": raw}
+
+            if response.status >= 400:
+                error_message = data.get("message") if isinstance(data, dict) else None
+                raise RuntimeError(error_message or f"Failed to edit message (status {response.status})")
+
+            return data if isinstance(data, dict) else {}
+
+
+async def get_guild_channels(token: str, guild_id: str) -> list[dict]:
+    if not guild_id:
+        raise RuntimeError("guild_id is required")
+
+    headers = {"Authorization": f"Bot {token}"}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        async with session.get(f"{DISCORD_API_BASE}/guilds/{guild_id}/channels") as response:
+            raw = await response.text()
+            if response.status >= 400:
+                try:
+                    payload = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    payload = {}
+
+                error_message = payload.get("message") if isinstance(payload, dict) else None
+                raise RuntimeError(error_message or f"Discord API request failed with status {response.status}")
+
+            try:
+                channels = json.loads(raw) if raw else []
+            except json.JSONDecodeError:
+                return []
+
+    if not isinstance(channels, list):
+        return []
+
+    return [channel for channel in channels if isinstance(channel, dict)]

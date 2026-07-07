@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from accounts import AccountService
 
 from database import (
+    delete_mousetrap_config,
     get_dm_history,
     get_dm_message,
     get_dm_users,
@@ -14,11 +15,14 @@ from database import (
     init_db,
     insert_event,
     mark_dm_message_deleted,
+    get_mousetrap_config,
+    upsert_mousetrap_config,
     regenerate_db,
     save_sent_dm_message,
 )
-from discord import runbot, send_dm, delete_dm
+from discord import runbot, send_dm, delete_dm, get_guild_channels
 from webback import create_app
+from mousetrap import build_mousetrap_logs, handle_guild_message, send_mousetrap_notice, set_mousetrap_channel
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -73,6 +77,12 @@ app = create_app(
     app_id=APP_ID,
     bot_state=BOT_STATE,
     account_service=account_service,
+    get_guild_channels=lambda server_id: asyncio.run(get_guild_channels(TOKEN, guild_id=server_id)),
+    get_mousetrap_config=lambda server_id: get_mousetrap_config(DB_PATH, guild_id=server_id),
+    save_mousetrap_config=lambda server_id, channel_id: _save_mousetrap_config(server_id, channel_id),
+    get_mousetrap_logs=lambda server_id, channel_id=None, limit=100: asyncio.run(
+        build_mousetrap_logs(TOKEN, DB_PATH, guild_id=server_id, channel_id=channel_id, limit=limit)
+    ),
     get_events=lambda limit=25: get_events(DB_PATH, limit=limit),
     get_dm_users=lambda limit_events=300: get_dm_users(DB_PATH, limit_events=limit_events),
     get_dm_history=lambda user_id, limit=120: get_dm_history(DB_PATH, user_id=user_id, limit=limit),
@@ -89,6 +99,20 @@ app = create_app(
     ),
     regenerate_db=lambda: regenerate_db(DB_PATH),
 )
+
+
+def _save_mousetrap_config(server_id: str, channel_id: str | None):
+    try:
+        return asyncio.run(set_mousetrap_channel(TOKEN, DB_PATH, guild_id=server_id, channel_id=channel_id))
+    except Exception as err:
+        existing = get_mousetrap_config(DB_PATH, guild_id=server_id)
+        return {
+            "guild_id": server_id,
+            "channel_id": channel_id,
+            "kick_count": int(existing.get("kick_count") or 0) if existing else 0,
+            "enabled": bool(channel_id),
+            "warning": str(err),
+        }
 
 
 def run_flask_server():
@@ -124,5 +148,6 @@ if __name__ == "__main__":
             save_event=lambda event_type, sequence, payload: insert_event(
                 DB_PATH, event_type, sequence, payload
             ),
+            handle_guild_message=lambda payload: handle_guild_message(TOKEN, DB_PATH, payload),
         )
     )

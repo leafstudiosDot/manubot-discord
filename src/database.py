@@ -59,12 +59,56 @@ def init_db(db_path: Path) -> None:
         ON dm_messages(channel_id, updated_at DESC)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mousetrap_configs (
+            guild_id TEXT PRIMARY KEY,
+            channel_id TEXT NOT NULL,
+            kick_count INTEGER NOT NULL DEFAULT 0,
+            notice_channel_id TEXT,
+            notice_message_id TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mousetrap_message_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            attachments_json TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_mousetrap_logs_guild_channel_time
+        ON mousetrap_message_logs(guild_id, channel_id, occurred_at DESC)
+        """
+    )
+    _ensure_mousetrap_config_columns(conn)
     conn.commit()
     conn.close()
 
 
 def _utc_now() -> str:
     return datetime.utcnow().isoformat()
+
+
+def _ensure_mousetrap_config_columns(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("PRAGMA table_info(mousetrap_configs)").fetchall()
+    existing_columns = {str(row[1]) for row in rows}
+
+    if "notice_channel_id" not in existing_columns:
+        conn.execute("ALTER TABLE mousetrap_configs ADD COLUMN notice_channel_id TEXT")
+
+    if "notice_message_id" not in existing_columns:
+        conn.execute("ALTER TABLE mousetrap_configs ADD COLUMN notice_message_id TEXT")
 
 
 def _upsert_dm_channel(conn: sqlite3.Connection, channel_id: str, user_id: str) -> None:
@@ -541,6 +585,248 @@ def regenerate_db(db_path: Path) -> int:
     conn.close()
 
     return int(deleted_count)
+
+
+def delete_mousetrap_config(db_path: Path, guild_id: str) -> None:
+    if not guild_id:
+        return
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        DELETE FROM mousetrap_configs
+        WHERE guild_id = ?
+        """,
+        (guild_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_mousetrap_notice_target(
+    db_path: Path,
+    guild_id: str,
+    notice_channel_id: str | None,
+    notice_message_id: str | None,
+) -> None:
+    if not guild_id:
+        return
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        UPDATE mousetrap_configs
+        SET notice_channel_id = ?,
+            notice_message_id = ?,
+            updated_at = ?
+        WHERE guild_id = ?
+        """,
+        (notice_channel_id, notice_message_id, _utc_now(), guild_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def upsert_mousetrap_config(db_path: Path, guild_id: str, channel_id: str, kick_count: int | None = None) -> None:
+    if not guild_id:
+        return
+
+    conn = sqlite3.connect(db_path)
+    current_kick_count = None
+    if kick_count is not None:
+        current_kick_count = max(0, int(kick_count or 0))
+    else:
+        row = conn.execute(
+            """
+            SELECT kick_count
+            FROM mousetrap_configs
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        ).fetchone()
+        if row:
+            current_kick_count = int(row[0] or 0)
+
+    if current_kick_count is None:
+        current_kick_count = 0
+
+    conn.execute(
+        """
+        INSERT INTO mousetrap_configs (guild_id, channel_id, kick_count, notice_channel_id, notice_message_id, updated_at)
+        VALUES (?, ?, ?, NULL, NULL, ?)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            channel_id = excluded.channel_id,
+            kick_count = excluded.kick_count,
+            notice_channel_id = NULL,
+            notice_message_id = NULL,
+            updated_at = excluded.updated_at
+        """,
+        (guild_id, channel_id, current_kick_count, _utc_now()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_mousetrap_config(db_path: Path, guild_id: str) -> dict | None:
+    if not guild_id:
+        return None
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """
+        SELECT guild_id, channel_id, kick_count, notice_channel_id, notice_message_id, updated_at
+        FROM mousetrap_configs
+        WHERE guild_id = ?
+        """,
+        (guild_id,),
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    return {
+        "guild_id": row["guild_id"],
+        "channel_id": row["channel_id"],
+        "kick_count": int(row["kick_count"] or 0),
+        "notice_channel_id": row["notice_channel_id"] if "notice_channel_id" in row.keys() else None,
+        "notice_message_id": row["notice_message_id"] if "notice_message_id" in row.keys() else None,
+        "updated_at": row["updated_at"],
+    }
+
+
+def increment_mousetrap_kick_count(db_path: Path, guild_id: str, amount: int = 1) -> int:
+    if not guild_id:
+        return 0
+
+    increment = max(1, int(amount or 1))
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        """
+        SELECT channel_id, kick_count, notice_channel_id, notice_message_id
+        FROM mousetrap_configs
+        WHERE guild_id = ?
+        """,
+        (guild_id,),
+    ).fetchone()
+
+    if not row:
+        conn.close()
+        return 0
+
+    channel_id = str(row[0] or "")
+    current_kick_count = int(row[1] or 0)
+    notice_channel_id = str(row[2] or "") or None
+    notice_message_id = str(row[3] or "") or None
+    conn.execute(
+        """
+        UPDATE mousetrap_configs
+        SET channel_id = ?,
+            kick_count = ?,
+            notice_channel_id = ?,
+            notice_message_id = ?,
+            updated_at = ?
+        WHERE guild_id = ?
+        """,
+        (channel_id, current_kick_count + increment, notice_channel_id, notice_message_id, _utc_now(), guild_id),
+    )
+    conn.commit()
+    conn.close()
+    return current_kick_count + increment
+
+
+def insert_mousetrap_message_log(
+    db_path: Path,
+    guild_id: str,
+    channel_id: str,
+    user_id: str,
+    content: str,
+    attachments: list[dict] | None,
+    occurred_at: str,
+) -> None:
+    if not guild_id or not channel_id or not user_id:
+        return
+
+    normalized_attachments = attachments if isinstance(attachments, list) else []
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO mousetrap_message_logs (
+            guild_id,
+            channel_id,
+            user_id,
+            content,
+            attachments_json,
+            occurred_at,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            guild_id,
+            channel_id,
+            user_id,
+            (content or "").strip(),
+            json.dumps(normalized_attachments),
+            occurred_at or _utc_now(),
+            _utc_now(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_mousetrap_message_logs(db_path: Path, guild_id: str, channel_id: str | None = None, limit: int = 100) -> list[dict]:
+    if not guild_id:
+        return []
+
+    safe_limit = max(1, min(limit, 500))
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    params: list[object] = [guild_id]
+    channel_clause = ""
+    if channel_id:
+        channel_clause = " AND channel_id = ?"
+        params.append(channel_id)
+
+    rows = conn.execute(
+        f"""
+        SELECT id, guild_id, channel_id, user_id, content, attachments_json, occurred_at, created_at
+        FROM mousetrap_message_logs
+        WHERE guild_id = ?{channel_clause}
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT ?
+        """,
+        (*params, safe_limit),
+    ).fetchall()
+    conn.close()
+
+    logs: list[dict] = []
+    for row in rows:
+        try:
+            attachments = json.loads(row["attachments_json"] or "[]")
+            if not isinstance(attachments, list):
+                attachments = []
+        except json.JSONDecodeError:
+            attachments = []
+
+        logs.append(
+            {
+                "id": row["id"],
+                "guild_id": row["guild_id"],
+                "channel_id": row["channel_id"],
+                "user_id": row["user_id"],
+                "content": row["content"],
+                "attachments": attachments,
+                "occurred_at": row["occurred_at"],
+                "created_at": row["created_at"],
+            }
+        )
+
+    return logs
 
 
 def init_account_db(db_path: Path) -> None:

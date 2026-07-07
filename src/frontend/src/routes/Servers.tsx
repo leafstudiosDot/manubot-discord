@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { MouseTrap } from "../parts/servers/MouseTrap";
 
 type Server = {
     id: string;
@@ -7,6 +9,14 @@ type Server = {
     owner: boolean;
     permissions: string | null;
     features: string[];
+    channels?: ServerChannel[];
+};
+
+type ServerChannel = {
+    id: string;
+    name: string;
+    type: number;
+    parent_id: string | null;
 };
 
 type PermissionFlag = {
@@ -255,6 +265,8 @@ function Servers({ loading, canView }) {
                                                 <span className="font-semibold text-slate-900">Guild Features:</span> {(selectedServer.features || []).length}
                                             </div>
                                         </div>
+
+                                        <MouseTrap serverId={selectedServer.id} channels={selectedServer.channels || []} />
 
                                         <div className="mb-3">
                                             <p className="mb-1 mt-0 text-sm font-semibold text-slate-900">Raw Permission Bitset</p>
