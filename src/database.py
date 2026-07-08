@@ -1,3 +1,4 @@
+import base64
 import json
 import sqlite3
 from datetime import datetime
@@ -87,10 +88,26 @@ def init_db(db_path: Path) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS mousetrap_message_attachment_blobs (
+            log_id INTEGER NOT NULL,
+            attachment_index INTEGER NOT NULL,
+            filename TEXT,
+            content_type TEXT,
+            size INTEGER,
+            blob BLOB NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (log_id, attachment_index),
+            FOREIGN KEY (log_id) REFERENCES mousetrap_message_logs(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_mousetrap_logs_guild_channel_time
         ON mousetrap_message_logs(guild_id, channel_id, occurred_at DESC)
         """
     )
+    _ensure_mousetrap_attachment_blob_columns(conn)
     _ensure_mousetrap_config_columns(conn)
     conn.commit()
     conn.close()
@@ -109,6 +126,26 @@ def _ensure_mousetrap_config_columns(conn: sqlite3.Connection) -> None:
 
     if "notice_message_id" not in existing_columns:
         conn.execute("ALTER TABLE mousetrap_configs ADD COLUMN notice_message_id TEXT")
+
+
+def _ensure_mousetrap_attachment_blob_columns(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("PRAGMA table_info(mousetrap_message_attachment_blobs)").fetchall()
+    existing_columns = {str(row[1]) for row in rows}
+
+    if "filename" not in existing_columns:
+        conn.execute("ALTER TABLE mousetrap_message_attachment_blobs ADD COLUMN filename TEXT")
+
+    if "content_type" not in existing_columns:
+        conn.execute("ALTER TABLE mousetrap_message_attachment_blobs ADD COLUMN content_type TEXT")
+
+    if "size" not in existing_columns:
+        conn.execute("ALTER TABLE mousetrap_message_attachment_blobs ADD COLUMN size INTEGER")
+
+    if "blob" not in existing_columns:
+        conn.execute("ALTER TABLE mousetrap_message_attachment_blobs ADD COLUMN blob BLOB")
+
+    if "created_at" not in existing_columns:
+        conn.execute("ALTER TABLE mousetrap_message_attachment_blobs ADD COLUMN created_at TEXT")
 
 
 def _upsert_dm_channel(conn: sqlite3.Connection, channel_id: str, user_id: str) -> None:
@@ -749,9 +786,41 @@ def insert_mousetrap_message_log(
         return
 
     normalized_attachments = attachments if isinstance(attachments, list) else []
+    attachment_rows = []
+    for index, attachment in enumerate(normalized_attachments):
+        if not isinstance(attachment, dict):
+            continue
+
+        blob_value = attachment.get("cached_blob")
+        if isinstance(blob_value, memoryview):
+            blob_value = blob_value.tobytes()
+
+        if not isinstance(blob_value, (bytes, bytearray)):
+            continue
+
+        attachment_rows.append(
+            (
+                index,
+                str(attachment.get("filename") or "") or None,
+                str(attachment.get("cached_content_type") or attachment.get("content_type") or "") or None,
+                int(attachment.get("cached_size") or len(blob_value)),
+                bytes(blob_value),
+                _utc_now(),
+            )
+        )
+
+    sanitized_attachments = []
+    for attachment in normalized_attachments:
+        if not isinstance(attachment, dict):
+            continue
+
+        sanitized_attachment = dict(attachment)
+        sanitized_attachment.pop("cached_blob", None)
+        sanitized_attachment.pop("cached_data_url", None)
+        sanitized_attachments.append(sanitized_attachment)
 
     conn = sqlite3.connect(db_path)
-    conn.execute(
+    cursor = conn.execute(
         """
         INSERT INTO mousetrap_message_logs (
             guild_id,
@@ -769,11 +838,30 @@ def insert_mousetrap_message_log(
             channel_id,
             user_id,
             (content or "").strip(),
-            json.dumps(normalized_attachments),
+            json.dumps(sanitized_attachments),
             occurred_at or _utc_now(),
             _utc_now(),
         ),
     )
+    log_id = cursor.lastrowid
+
+    if log_id and attachment_rows:
+        conn.executemany(
+            """
+            INSERT INTO mousetrap_message_attachment_blobs (
+                log_id,
+                attachment_index,
+                filename,
+                content_type,
+                size,
+                blob,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [(log_id, *row) for row in attachment_rows],
+        )
+
     conn.commit()
     conn.close()
 
@@ -804,6 +892,44 @@ def list_mousetrap_message_logs(db_path: Path, guild_id: str, channel_id: str | 
     ).fetchall()
     conn.close()
 
+    blob_rows = sqlite3.connect(db_path)
+    blob_rows.row_factory = sqlite3.Row
+    blob_rows_data = blob_rows.execute(
+        """
+        SELECT log_id, attachment_index, filename, content_type, size, blob
+        FROM mousetrap_message_attachment_blobs
+        WHERE log_id IN (%s)
+        ORDER BY log_id ASC, attachment_index ASC
+        """
+        % ",".join("?" for _ in rows)
+        if rows
+        else "SELECT log_id, attachment_index, filename, content_type, size, blob FROM mousetrap_message_attachment_blobs WHERE 0",
+        [row["id"] for row in rows] if rows else [],
+    ).fetchall()
+    blob_rows.close()
+
+    attachment_map: dict[int, list[dict]] = {}
+    for blob_row in blob_rows_data:
+        log_id = int(blob_row["log_id"])
+        content_type = str(blob_row["content_type"] or "")
+        blob_value = blob_row["blob"]
+        data_url = None
+        if blob_value is not None and content_type:
+            if isinstance(blob_value, memoryview):
+                blob_value = blob_value.tobytes()
+            if isinstance(blob_value, (bytes, bytearray)):
+                data_url = f"data:{content_type};base64,{base64.b64encode(bytes(blob_value)).decode('ascii')}"
+
+        attachment_map.setdefault(log_id, []).append(
+            {
+                "filename": blob_row["filename"],
+                "content_type": content_type or None,
+                "cached_content_type": content_type or None,
+                "cached_size": blob_row["size"],
+                "cached_data_url": data_url,
+            }
+        )
+
     logs: list[dict] = []
     for row in rows:
         try:
@@ -812,6 +938,13 @@ def list_mousetrap_message_logs(db_path: Path, guild_id: str, channel_id: str | 
                 attachments = []
         except json.JSONDecodeError:
             attachments = []
+
+        cached_attachments = attachment_map.get(int(row["id"]), [])
+        for index, attachment in enumerate(attachments):
+            if not isinstance(attachment, dict):
+                continue
+            if index < len(cached_attachments) and cached_attachments[index].get("cached_data_url"):
+                attachment.update(cached_attachments[index])
 
         logs.append(
             {

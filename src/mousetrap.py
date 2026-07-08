@@ -1,4 +1,6 @@
+import asyncio
 import json
+import mimetypes
 
 import aiohttp
 
@@ -13,6 +15,77 @@ from database import (
 from discord import delete_dm as delete_discord_message, edit_discord_message
 
 DISCORD_API_BASE = "https://discord.com/api"
+MAX_MOUSETTRAP_ATTACHMENT_CACHE_BYTES = 8 * 1024 * 1024
+
+
+def _resolve_attachment_content_type(attachment: dict) -> str:
+    content_type = str(attachment.get("content_type") or "").strip()
+    if content_type:
+        return content_type
+
+    filename = str(attachment.get("filename") or "").strip()
+    guessed_type, _ = mimetypes.guess_type(filename)
+    return guessed_type or ""
+
+
+def _is_cacheable_mousetrap_attachment(attachment: dict) -> bool:
+    content_type = _resolve_attachment_content_type(attachment)
+    if not content_type.startswith(("image/", "video/")):
+        return False
+
+    try:
+        size = int(attachment.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+
+    return size <= MAX_MOUSETTRAP_ATTACHMENT_CACHE_BYTES
+
+
+async def _cache_mousetrap_attachment(session: aiohttp.ClientSession, attachment: dict) -> dict:
+    cached_attachment = dict(attachment)
+    if not _is_cacheable_mousetrap_attachment(cached_attachment):
+        return cached_attachment
+
+    source_url = str(cached_attachment.get("proxy_url") or cached_attachment.get("url") or "").strip()
+    if not source_url:
+        return cached_attachment
+
+    try:
+        async with session.get(source_url) as response:
+            if response.status >= 400:
+                return cached_attachment
+
+            content_type = str(response.headers.get("Content-Type") or _resolve_attachment_content_type(cached_attachment) or "").strip()
+            if not content_type.startswith(("image/", "video/")):
+                return cached_attachment
+
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                try:
+                    if int(content_length) > MAX_MOUSETTRAP_ATTACHMENT_CACHE_BYTES:
+                        return cached_attachment
+                except (TypeError, ValueError):
+                    pass
+
+            raw_bytes = await response.read()
+            if len(raw_bytes) > MAX_MOUSETTRAP_ATTACHMENT_CACHE_BYTES:
+                return cached_attachment
+
+            cached_attachment["cached_blob"] = raw_bytes
+            cached_attachment["cached_content_type"] = content_type
+            cached_attachment["cached_size"] = len(raw_bytes)
+    except Exception:
+        return cached_attachment
+
+    return cached_attachment
+
+
+async def cache_mousetrap_attachments(attachments: list[dict]) -> list[dict]:
+    if not attachments:
+        return []
+
+    async with aiohttp.ClientSession() as session:
+        return await asyncio.gather(*(_cache_mousetrap_attachment(session, attachment) for attachment in attachments))
 
 
 def build_mousetrap_notice_payload(kick_count: int) -> dict:
@@ -306,6 +379,18 @@ async def handle_guild_message(token: str, db_path, payload: dict) -> None:
     if not user_id:
         return
 
+    occurred_at = str(data.get("timestamp") or "")
+    content = str(data.get("content") or "")
+    attachments = data.get("attachments") or []
+    if not isinstance(attachments, list):
+        attachments = []
+
+    cached_attachments = []
+    try:
+        cached_attachments = await cache_mousetrap_attachments(attachments)
+    except Exception:
+        cached_attachments = attachments
+
     message_id = str(data.get("id") or "")
     if message_id:
         try:
@@ -319,19 +404,13 @@ async def handle_guild_message(token: str, db_path, payload: dict) -> None:
     except Exception:
         return
 
-    occurred_at = str(data.get("timestamp") or "")
-    content = str(data.get("content") or "")
-    attachments = data.get("attachments") or []
-    if not isinstance(attachments, list):
-        attachments = []
-
     record_mousetrap_trigger(
         db_path=db_path,
         guild_id=guild_id,
         channel_id=channel_id,
         user_id=user_id,
         content=content,
-        attachments=attachments,
+        attachments=cached_attachments,
         occurred_at=occurred_at,
     )
 

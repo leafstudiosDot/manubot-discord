@@ -25,6 +25,9 @@ type MouseTrapLog = {
         url?: string;
         proxy_url?: string;
         content_type?: string;
+        cached_data_url?: string | null;
+        cached_content_type?: string | null;
+        cached_size?: number | null;
     }>;
     occurred_at: string;
     created_at: string;
@@ -38,6 +41,15 @@ type MouseTrapLog = {
         bot: boolean;
     };
 };
+
+function isMediaAttachment(attachment: MouseTrapLog["attachments"][number]) {
+    const contentType = attachment.cached_content_type || attachment.content_type || "";
+    return contentType.startsWith("image/") || contentType.startsWith("video/");
+}
+
+function getAttachmentSource(attachment: MouseTrapLog["attachments"][number]) {
+    return attachment.cached_data_url || attachment.proxy_url || attachment.url || null;
+}
 
 function MouseTrapRoute() {
     const { serverId } = useParams();
@@ -175,11 +187,36 @@ function MouseTrapRoute() {
                                     {log.content && <p className="mt-2 whitespace-pre-wrap break-words text-sm text-slate-700">{log.content}</p>}
 
                                     {Array.isArray(log.attachments) && log.attachments.length > 0 && (
-                                        <ul className="mt-2 list-disc pl-5 text-xs text-slate-600">
+                                        <ul className="mt-3 space-y-2 text-xs text-slate-600">
                                             {log.attachments.map((attachment, index) => (
-                                                <li key={`${log.id}-${index}`}>
-                                                    {attachment.url ? (
-                                                        <a href={attachment.url} target="_blank" rel="noreferrer" className="text-slate-700 underline">
+                                                <li key={`${log.id}-${index}`} className="overflow-hidden rounded-lg border border-slate-200 bg-white p-2">
+                                                    {isMediaAttachment(attachment) && getAttachmentSource(attachment) ? (
+                                                        <div className="space-y-2">
+                                                            {attachment.cached_content_type?.startsWith("video/") || attachment.content_type?.startsWith("video/") ? (
+                                                                <video
+                                                                    controls
+                                                                    className="max-h-80 w-full rounded-md bg-black object-contain"
+                                                                    src={getAttachmentSource(attachment) || undefined}
+                                                                />
+                                                            ) : (
+                                                                <img
+                                                                    src={getAttachmentSource(attachment) || undefined}
+                                                                    alt={attachment.filename || "attachment"}
+                                                                    className="max-h-80 w-full rounded-md object-contain"
+                                                                    loading="lazy"
+                                                                />
+                                                            )}
+                                                            <a
+                                                                href={getAttachmentSource(attachment) || undefined}
+                                                                target="_blank"
+                                                                rel="noreferrer"
+                                                                className="block break-all text-slate-700 underline"
+                                                            >
+                                                                {attachment.filename || "attachment"}
+                                                            </a>
+                                                        </div>
+                                                    ) : attachment.url ? (
+                                                        <a href={attachment.url} target="_blank" rel="noreferrer" className="break-all text-slate-700 underline">
                                                             {attachment.filename || "attachment"}
                                                         </a>
                                                     ) : (
