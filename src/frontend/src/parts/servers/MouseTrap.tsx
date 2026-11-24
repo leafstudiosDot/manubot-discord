@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { apiFetch } from "../../api";
 
 type Channel = {
     id: string;
@@ -37,7 +38,7 @@ export function MouseTrap({ serverId, channels }: MouseTrapProps) {
         const loadConfig = async () => {
             setLoading(true);
             try {
-                const response = await fetch(`/api/servers/${serverId}/mousetrap`);
+                const response = await apiFetch(`/api/servers/${serverId}/mousetrap`);
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok) {
                     throw new Error(data?.message || "Failed to load MouseTrap config");
@@ -81,7 +82,7 @@ export function MouseTrap({ serverId, channels }: MouseTrapProps) {
         setStatus(null);
 
         try {
-            const response = await fetch(`/api/servers/${serverId}/mousetrap`, {
+            const response = await apiFetch(`/api/servers/${serverId}/mousetrap`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",

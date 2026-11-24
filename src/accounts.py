@@ -1,11 +1,26 @@
 import json
+import logging
 import re
 import secrets
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from http import cookies
 
 import bcrypt
 
+from audit import (
+    ACTION_ACCOUNT_CREATE,
+    ACTION_ACCOUNT_PASSWORD_CHANGE,
+    ACTION_ACCOUNT_PASSWORD_RESET,
+    ACTION_ACCOUNT_PERMISSIONS_UPDATE,
+    ACTION_LOGIN_FAILED,
+    ACTION_LOGIN_SUCCESS,
+    CATEGORY_ACCOUNTS,
+    CATEGORY_AUTH,
+    AuditService,
+)
+from config import Settings
 from database import (
     get_panel_account_by_id,
     get_panel_account_by_username,
@@ -21,6 +36,12 @@ from database import (
     update_panel_account_password,
     update_panel_account_permissions,
 )
+from security import (
+    LoginRateLimiter,
+    derive_csrf_token,
+    utc_now_iso,
+    validate_password_length,
+)
 
 ROLE_SUPERADMIN = "superadmin"
 ROLE_ADMIN = "admin"
@@ -34,6 +55,7 @@ PERMISSION_DIRECT_MESSAGES_DELETE = "direct_messages_delete"
 PERMISSION_DATABASE_REGENERATE = "database_regenerate"
 PERMISSION_ACCOUNTS_VIEW = "accounts_view"
 PERMISSION_MODERATOR_MANAGE = "moderator_manage"
+PERMISSION_AUDIT_VIEW = "audit_view"
 
 ALL_PERMISSIONS = (
     PERMISSION_EVENTS_VIEW,
@@ -44,6 +66,7 @@ ALL_PERMISSIONS = (
     PERMISSION_DATABASE_REGENERATE,
     PERMISSION_ACCOUNTS_VIEW,
     PERMISSION_MODERATOR_MANAGE,
+    PERMISSION_AUDIT_VIEW,
 )
 
 DEFAULT_MODERATOR_PERMISSIONS = {
@@ -55,17 +78,29 @@ DEFAULT_MODERATOR_PERMISSIONS = {
     PERMISSION_DATABASE_REGENERATE: False,
     PERMISSION_ACCOUNTS_VIEW: False,
     PERMISSION_MODERATOR_MANAGE: False,
+    PERMISSION_AUDIT_VIEW: False,
 }
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _utc_now() -> str:
-    return datetime.utcnow().isoformat()
+    return utc_now_iso()
+
+
+@lru_cache(maxsize=1)
+def _dummy_password_hash() -> str:
+    return bcrypt.hashpw(b"manubot-dummy-password", bcrypt.gensalt(rounds=12)).decode(
+        "utf-8"
+    )
 
 
 def hash_password(password: str) -> str:
     encoded = (password or "").encode("utf-8")
     if not encoded:
         raise ValueError("Password is required")
+    if len(encoded) > 72:
+        raise ValueError("Password must be at most 72 bytes (UTF-8)")
     return bcrypt.hashpw(encoded, bcrypt.gensalt(rounds=12)).decode("utf-8")
 
 
@@ -90,7 +125,7 @@ def _normalize_permissions(raw: dict | None) -> dict[str, bool]:
         if key in raw:
             base[key] = bool(raw[key])
 
-    # Moderator permissions cannot escalate moderator into account manager.
+    # Moderator permissions cannot escalate a moderator into account manager.
     base[PERMISSION_MODERATOR_MANAGE] = False
     base[PERMISSION_ACCOUNTS_VIEW] = False
     base[PERMISSION_DATABASE_REGENERATE] = False
@@ -101,6 +136,14 @@ def _all_permissions_true() -> dict[str, bool]:
     return {key: True for key in ALL_PERMISSIONS}
 
 
+@dataclass(frozen=True)
+class LoginResult:
+    session: dict | None = None
+    error: str | None = None
+    status_code: int = 200
+    retry_after: int | None = None
+
+
 class AccountService:
     def __init__(
         self,
@@ -108,17 +151,44 @@ class AccountService:
         superadmin_username: str,
         superadmin_password: str,
         superadmin_password_hash: str | None = None,
-        cookie_name: str = "panel_session",
+        cookie_name: str | None = None,
+        settings: Settings | None = None,
+        audit_service: AuditService | None = None,
+        rate_limiter: LoginRateLimiter | None = None,
     ):
         self.db_path = db_path
+        self.settings = settings or Settings.from_env()
         self.superadmin_username = (superadmin_username or "").strip()
         self.superadmin_password = superadmin_password or ""
         self.superadmin_password_hash = (superadmin_password_hash or "").strip() or None
-        self.cookie_name = cookie_name
-        self.session_ttl = timedelta(hours=12)
+        self.cookie_name = cookie_name or self.settings.session_cookie_name
+        self.session_ttl = timedelta(hours=self.settings.session_ttl_hours)
+        self.csrf_secret = self.settings.csrf_secret
+        self.audit = audit_service or AuditService(db_path)
+        self.rate_limiter = rate_limiter or LoginRateLimiter(
+            enabled=self.settings.login_rate_limit_enabled,
+            max_attempts=self.settings.login_rate_limit_attempts,
+            window_seconds=self.settings.login_rate_limit_window_seconds,
+            block_seconds=self.settings.login_rate_limit_block_seconds,
+        )
 
     def init_db(self) -> None:
-        init_account_db(self.db_path)
+        init_account_db(
+            self.db_path,
+            backup_dir=self.settings.backup_dir,
+            backup_retention=self.settings.backup_retention,
+        )
+
+    def _audit(self, *, action, category, actor_session=None, **kwargs) -> None:
+        try:
+            self.audit.record(
+                action=action,
+                category=category,
+                actor_session=actor_session,
+                **kwargs,
+            )
+        except Exception:
+            LOGGER.exception("Audit logging failed")
 
     def _new_session(
         self,
@@ -128,9 +198,10 @@ class AccountService:
         permissions: dict[str, bool],
     ) -> dict:
         token = secrets.token_urlsafe(48)
-        expires_at = datetime.utcnow() + self.session_ttl
+        expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + self.session_ttl
         session = {
             "token": token,
+            "csrf_token": derive_csrf_token(self.csrf_secret, token),
             "username": username,
             "role": role,
             "account_id": account_id,
@@ -183,7 +254,7 @@ class AccountService:
             revoke_panel_session_by_token(self.db_path, token, _utc_now())
             return None
 
-        if datetime.utcnow() >= expires_at:
+        if datetime.now(timezone.utc).replace(tzinfo=None) >= expires_at:
             revoke_panel_session_by_token(self.db_path, token, _utc_now())
             return None
 
@@ -214,7 +285,8 @@ class AccountService:
             )
 
         return {
-            "token": str(row["token"]),
+            "token": token,
+            "csrf_token": derive_csrf_token(self.csrf_secret, token),
             "username": username,
             "role": role,
             "account_id": account_id,
@@ -239,13 +311,19 @@ class AccountService:
             session["token"],
             max_age=max_age,
             httponly=True,
-            secure=False,
-            samesite="Lax",
+            secure=self.settings.session_cookie_secure,
+            samesite=self.settings.session_cookie_samesite,
             path="/",
         )
 
     def clear_session_cookie(self, flask_response):
-        flask_response.delete_cookie(self.cookie_name, path="/")
+        flask_response.delete_cookie(
+            self.cookie_name,
+            path="/",
+            secure=self.settings.session_cookie_secure,
+            httponly=True,
+            samesite=self.settings.session_cookie_samesite,
+        )
 
     def session_public(self, session: dict) -> dict:
         return {
@@ -253,6 +331,7 @@ class AccountService:
             "role": session["role"],
             "permissions": dict(session.get("permissions") or {}),
             "expires_at": session.get("expires_at"),
+            "csrf_token": session.get("csrf_token"),
         }
 
     def has_permission(self, session: dict | None, permission: str) -> bool:
@@ -264,18 +343,64 @@ class AccountService:
         permissions = session.get("permissions") or {}
         return bool(permissions.get(permission))
 
-    def login(self, username: str, password: str) -> tuple[dict | None, str | None]:
+    def validate_csrf(self, session: dict | None, provided_token: str | None) -> bool:
+        if not session:
+            return False
+        expected = str(session.get("csrf_token") or "")
+        provided = str(provided_token or "").strip()
+        if not expected or not provided:
+            return False
+        return secrets.compare_digest(expected, provided)
+
+    def login(
+        self,
+        username: str,
+        password: str,
+        client_ip: str | None = None,
+    ) -> LoginResult:
         clean_username = (username or "").strip()
         if not clean_username or not password:
-            return None, "Username and password are required"
+            return LoginResult(
+                error="Username and password are required",
+                status_code=400,
+            )
+        if len(clean_username) > 100 or len(password) > 1024:
+            return LoginResult(error="Invalid credentials", status_code=401)
 
-        # Superadmin credentials are sourced from .env.
-        if self.superadmin_username and clean_username.lower() == self.superadmin_username.lower():
+        rate_keys = [f"user:{clean_username.lower()}"]
+        if client_ip:
+            rate_keys.append(f"ip:{client_ip}")
+
+        retry_after = self.rate_limiter.retry_after(rate_keys)
+        if retry_after > 0:
+            self._audit(
+                action=ACTION_LOGIN_FAILED,
+                category=CATEGORY_AUTH,
+                actor_username=clean_username,
+                actor_role="unknown",
+                metadata={"reason": "rate_limited", "client_ip": client_ip},
+            )
+            return LoginResult(
+                error="Too many login attempts. Try again later.",
+                status_code=429,
+                retry_after=retry_after,
+            )
+
+        # Superadmin credentials come from the environment. Never fall through
+        # to a same-named database account when the superadmin password is wrong.
+        if (
+            self.superadmin_username
+            and clean_username.lower() == self.superadmin_username.lower()
+        ):
             valid_superadmin = False
             if self.superadmin_password_hash:
-                valid_superadmin = verify_password(password, self.superadmin_password_hash)
+                valid_superadmin = verify_password(
+                    password, self.superadmin_password_hash
+                )
             elif self.superadmin_password:
-                valid_superadmin = secrets.compare_digest(password, self.superadmin_password)
+                valid_superadmin = secrets.compare_digest(
+                    password, self.superadmin_password
+                )
 
             if valid_superadmin:
                 session = self._new_session(
@@ -284,15 +409,50 @@ class AccountService:
                     account_id=None,
                     permissions=_all_permissions_true(),
                 )
-                return session, None
+                self.rate_limiter.reset(rate_keys)
+                self._audit(
+                    action=ACTION_LOGIN_SUCCESS,
+                    category=CATEGORY_AUTH,
+                    actor_session=session,
+                    metadata={"client_ip": client_ip},
+                )
+                return LoginResult(session=session)
+
+            self.rate_limiter.record_failure(rate_keys)
+            self._audit(
+                action=ACTION_LOGIN_FAILED,
+                category=CATEGORY_AUTH,
+                actor_username=clean_username,
+                actor_role="unknown",
+                metadata={"reason": "invalid_credentials", "client_ip": client_ip},
+            )
+            return LoginResult(error="Invalid credentials", status_code=401)
 
         row = get_panel_account_by_username(self.db_path, clean_username)
         if not row:
-            return None, "Invalid credentials"
+            # Keep timing roughly comparable for unknown usernames.
+            verify_password(password, _dummy_password_hash())
+            self.rate_limiter.record_failure(rate_keys)
+            self._audit(
+                action=ACTION_LOGIN_FAILED,
+                category=CATEGORY_AUTH,
+                actor_username=clean_username,
+                actor_role="unknown",
+                metadata={"reason": "invalid_credentials", "client_ip": client_ip},
+            )
+            return LoginResult(error="Invalid credentials", status_code=401)
 
         password_hash = str(row.get("password_hash") or "")
         if not verify_password(password, password_hash):
-            return None, "Invalid credentials"
+            self.rate_limiter.record_failure(rate_keys)
+            self._audit(
+                action=ACTION_LOGIN_FAILED,
+                category=CATEGORY_AUTH,
+                actor_username=clean_username,
+                actor_role=str(row.get("role") or "unknown"),
+                metadata={"reason": "invalid_credentials", "client_ip": client_ip},
+            )
+            return LoginResult(error="Invalid credentials", status_code=401)
 
         role = str(row["role"])
         raw_permissions = {}
@@ -313,7 +473,14 @@ class AccountService:
             account_id=int(row["id"]),
             permissions=permissions,
         )
-        return session, None
+        self.rate_limiter.reset(rate_keys)
+        self._audit(
+            action=ACTION_LOGIN_SUCCESS,
+            category=CATEGORY_AUTH,
+            actor_session=session,
+            metadata={"client_ip": client_ip},
+        )
+        return LoginResult(session=session)
 
     def revoke_session_token(self, token: str | None) -> bool:
         clean_token = (token or "").strip()
@@ -397,17 +564,24 @@ class AccountService:
         if not re.fullmatch(r"[a-zA-Z0-9_.-]{3,32}", clean_username):
             return None, "Username must be 3-32 chars and use a-z, A-Z, 0-9, ., _, -"
 
+        if (
+            self.superadmin_username
+            and clean_username.lower() == self.superadmin_username.lower()
+        ):
+            return None, "That username is reserved"
+
         clean_role = (role or "").strip().lower()
         if clean_role not in (ROLE_ADMIN, ROLE_MODERATOR):
             return None, "Role must be either admin or moderator"
 
-        if len(password or "") < 8:
-            return None, "Password must be at least 8 characters"
+        password_error = validate_password_length(password)
+        if password_error:
+            return None, password_error
 
         password_hash = hash_password(password)
         permissions = _all_permissions_true() if clean_role == ROLE_ADMIN else _normalize_permissions({})
 
-        inserted = insert_panel_account(
+        inserted_id = insert_panel_account(
             db_path=self.db_path,
             username=clean_username,
             password_hash=password_hash,
@@ -416,10 +590,19 @@ class AccountService:
             created_at=_utc_now(),
             updated_at=_utc_now(),
         )
-        if not inserted:
+        if inserted_id is None:
             return None, "Username already exists"
 
-        return {"username": clean_username, "role": clean_role}, None
+        self._audit(
+            action=ACTION_ACCOUNT_CREATE,
+            category=CATEGORY_ACCOUNTS,
+            actor_session=actor_session,
+            target_type="account",
+            target_id=str(inserted_id),
+            metadata={"username": clean_username, "role": clean_role},
+        )
+
+        return {"id": inserted_id, "username": clean_username, "role": clean_role}, None
 
     def update_moderator_permissions(
         self,
@@ -437,12 +620,34 @@ class AccountService:
         if str(row["role"]) != ROLE_MODERATOR:
             return None, "Only moderator permissions can be updated"
 
+        try:
+            previous_raw = json.loads(row.get("permissions_json") or "{}")
+        except Exception:
+            previous_raw = {}
+        previous = _normalize_permissions(previous_raw)
         normalized = _normalize_permissions(permissions)
         update_panel_account_permissions(
             db_path=self.db_path,
             account_id=account_id,
             permissions_json=json.dumps(normalized),
             updated_at=_utc_now(),
+        )
+
+        changed = {
+            key: normalized[key]
+            for key in ALL_PERMISSIONS
+            if previous.get(key) != normalized.get(key)
+        }
+        self._audit(
+            action=ACTION_ACCOUNT_PERMISSIONS_UPDATE,
+            category=CATEGORY_ACCOUNTS,
+            actor_session=actor_session,
+            target_type="account",
+            target_id=str(account_id),
+            metadata={
+                "username": str(row["username"]),
+                "changed_permissions": changed,
+            },
         )
 
         return {
@@ -462,8 +667,9 @@ class AccountService:
         if role not in (ROLE_ADMIN, ROLE_MODERATOR):
             return None, "Only admin and moderator can change own password"
 
-        if len(new_password or "") < 8:
-            return None, "New password must be at least 8 characters"
+        password_error = validate_password_length(new_password)
+        if password_error:
+            return None, password_error
 
         username = str(actor_session.get("username") or "").strip()
         if not username:
@@ -482,14 +688,28 @@ class AccountService:
             password_hash=hash_password(new_password),
             updated_at=_utc_now(),
         )
-        return {"username": username}, None
+
+        revoked_count = self.revoke_user_sessions(
+            username=username,
+            exclude_token=str(actor_session.get("token") or "") or None,
+        )
+        self._audit(
+            action=ACTION_ACCOUNT_PASSWORD_CHANGE,
+            category=CATEGORY_ACCOUNTS,
+            actor_session=actor_session,
+            target_type="account",
+            target_id=str(row["id"]),
+            metadata={"revoked_sessions": revoked_count},
+        )
+        return {"username": username, "revoked_sessions": revoked_count}, None
 
     def superadmin_set_account_password(self, actor_session: dict, account_id: int, new_password: str):
         if actor_session.get("role") != ROLE_SUPERADMIN:
             return None, "Only superadmin can change admin and moderator passwords"
 
-        if len(new_password or "") < 8:
-            return None, "New password must be at least 8 characters"
+        password_error = validate_password_length(new_password)
+        if password_error:
+            return None, password_error
 
         row = get_panel_account_by_id(self.db_path, account_id)
         if not row:
@@ -507,6 +727,17 @@ class AccountService:
         )
 
         revoked_count = self.revoke_user_sessions(username=str(row["username"]))
+        self._audit(
+            action=ACTION_ACCOUNT_PASSWORD_RESET,
+            category=CATEGORY_ACCOUNTS,
+            actor_session=actor_session,
+            target_type="account",
+            target_id=str(row["id"]),
+            metadata={
+                "username": str(row["username"]),
+                "revoked_sessions": revoked_count,
+            },
+        )
         return {
             "id": int(row["id"]),
             "username": str(row["username"]),

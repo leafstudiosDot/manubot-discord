@@ -1,6 +1,8 @@
 # Genera
 venv
-__pycache__
+.venv/
+__pycache__/
+.pytest_cache/
 .env
 *.log
 .DS_Store
@@ -18,9 +20,14 @@ dist/
 *.egg-info/
 
 # Frontend
-node_modules/
-src/frontend/node_modules/
+node_modules*/
+src/frontend/node_modules*/
 src/frontend/dist/
 
 *.db
 *.db.bak
+
+# Local runtime data and database backups
+backups/
+src/backups/
+data/

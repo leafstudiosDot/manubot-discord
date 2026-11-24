@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { apiFetch } from "../api";
+import { safeHttpUrl } from "../urls";
 
 type ServerChannel = {
     id: string;
@@ -42,13 +44,56 @@ type MouseTrapLog = {
     };
 };
 
-function isMediaAttachment(attachment: MouseTrapLog["attachments"][number]) {
-    const contentType = attachment.cached_content_type || attachment.content_type || "";
-    return contentType.startsWith("image/") || contentType.startsWith("video/");
+const ALLOWED_IMAGE_TYPES = new Set([
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+    "image/apng",
+]);
+
+const ALLOWED_VIDEO_TYPES = new Set([
+    "video/mp4",
+    "video/webm",
+    "video/ogg",
+    "video/quicktime",
+]);
+
+function normalizedContentType(value: string | null | undefined) {
+    return (value || "").split(";")[0].trim().toLowerCase();
+}
+
+function isAllowedMediaType(value: string | null | undefined) {
+    const contentType = normalizedContentType(value);
+    return ALLOWED_IMAGE_TYPES.has(contentType) || ALLOWED_VIDEO_TYPES.has(contentType);
+}
+
+function isSafeCachedDataUrl(value: string | null | undefined, contentType: string) {
+    if (!value || !value.startsWith("data:")) {
+        return false;
+    }
+    return value.startsWith(`data:${contentType};base64,`);
+}
+
+function getAttachmentContentType(attachment: MouseTrapLog["attachments"][number]) {
+    const cachedType = normalizedContentType(attachment.cached_content_type);
+    if (isAllowedMediaType(cachedType)) {
+        return cachedType;
+    }
+    const contentType = normalizedContentType(attachment.content_type);
+    return isAllowedMediaType(contentType) ? contentType : "";
 }
 
 function getAttachmentSource(attachment: MouseTrapLog["attachments"][number]) {
-    return attachment.cached_data_url || attachment.proxy_url || attachment.url || null;
+    const contentType = getAttachmentContentType(attachment);
+    if (!contentType) {
+        return null;
+    }
+    if (isSafeCachedDataUrl(attachment.cached_data_url, contentType)) {
+        return attachment.cached_data_url || null;
+    }
+    return safeHttpUrl(attachment.proxy_url) || safeHttpUrl(attachment.url) || null;
 }
 
 function MouseTrapRoute() {
@@ -73,8 +118,8 @@ function MouseTrapRoute() {
             setLoading(true);
             try {
                 const [serversResponse, logsResponse] = await Promise.all([
-                    fetch("/api/servers"),
-                    fetch(`/api/servers/${serverId}/mousetrap/logs?limit=100`),
+                    apiFetch("/api/servers"),
+                    apiFetch(`/api/servers/${serverId}/mousetrap/logs?limit=100`),
                 ]);
 
                 const serversData = await serversResponse.json().catch(() => ({}));
@@ -165,8 +210,8 @@ function MouseTrapRoute() {
                     {logs.map((log) => (
                         <li key={log.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                             <div className="flex items-start gap-3">
-                                {log.author?.avatar_url ? (
-                                    <img src={log.author.avatar_url} alt={log.author.display_name} className="h-10 w-10 rounded-full object-cover" />
+                                {safeHttpUrl(log.author?.avatar_url) ? (
+                                    <img src={safeHttpUrl(log.author?.avatar_url) || undefined} alt={log.author.display_name} className="h-10 w-10 rounded-full object-cover" />
                                 ) : (
                                     <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-200 text-xs font-semibold text-slate-600">
                                         {log.author?.display_name?.slice(0, 1).toUpperCase() || "?"}
@@ -190,38 +235,47 @@ function MouseTrapRoute() {
                                         <ul className="mt-3 space-y-2 text-xs text-slate-600">
                                             {log.attachments.map((attachment, index) => (
                                                 <li key={`${log.id}-${index}`} className="overflow-hidden rounded-lg border border-slate-200 bg-white p-2">
-                                                    {isMediaAttachment(attachment) && getAttachmentSource(attachment) ? (
-                                                        <div className="space-y-2">
-                                                            {attachment.cached_content_type?.startsWith("video/") || attachment.content_type?.startsWith("video/") ? (
-                                                                <video
-                                                                    controls
-                                                                    className="max-h-80 w-full rounded-md bg-black object-contain"
-                                                                    src={getAttachmentSource(attachment) || undefined}
-                                                                />
-                                                            ) : (
-                                                                <img
-                                                                    src={getAttachmentSource(attachment) || undefined}
-                                                                    alt={attachment.filename || "attachment"}
-                                                                    className="max-h-80 w-full rounded-md object-contain"
-                                                                    loading="lazy"
-                                                                />
-                                                            )}
-                                                            <a
-                                                                href={getAttachmentSource(attachment) || undefined}
-                                                                target="_blank"
-                                                                rel="noreferrer"
-                                                                className="block break-all text-slate-700 underline"
-                                                            >
-                                                                {attachment.filename || "attachment"}
-                                                            </a>
-                                                        </div>
-                                                    ) : attachment.url ? (
-                                                        <a href={attachment.url} target="_blank" rel="noreferrer" className="break-all text-slate-700 underline">
-                                                            {attachment.filename || "attachment"}
-                                                        </a>
-                                                    ) : (
-                                                        attachment.filename || "attachment"
-                                                    )}
+                                                    {(() => {
+                                                        const contentType = getAttachmentContentType(attachment);
+                                                        const source = getAttachmentSource(attachment);
+                                                        if (contentType && source) {
+                                                            return (
+                                                                <div className="space-y-2">
+                                                                    {ALLOWED_VIDEO_TYPES.has(contentType) ? (
+                                                                        <video
+                                                                            controls
+                                                                            className="max-h-80 w-full rounded-md bg-black object-contain"
+                                                                            src={source}
+                                                                        />
+                                                                    ) : (
+                                                                        <img
+                                                                            src={source}
+                                                                            alt={attachment.filename || "attachment"}
+                                                                            className="max-h-80 w-full rounded-md object-contain"
+                                                                            loading="lazy"
+                                                                        />
+                                                                    )}
+                                                                    <a
+                                                                        href={source}
+                                                                        target="_blank"
+                                                                        rel="noreferrer noopener"
+                                                                        className="block break-all text-slate-700 underline"
+                                                                    >
+                                                                        {attachment.filename || "attachment"}
+                                                                    </a>
+                                                                </div>
+                                                            );
+                                                        }
+                                                        const externalUrl = safeHttpUrl(attachment.url);
+                                                        if (externalUrl) {
+                                                            return (
+                                                                <a href={externalUrl} target="_blank" rel="noreferrer noopener" className="break-all text-slate-700 underline">
+                                                                    {attachment.filename || "attachment"}
+                                                                </a>
+                                                            );
+                                                        }
+                                                        return attachment.filename || "attachment";
+                                                    })()}
                                                 </li>
                                             ))}
                                         </ul>

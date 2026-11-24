@@ -1,8 +1,12 @@
 import base64
 import json
+import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from media import is_allowed_media_type, normalize_media_content_type
+from security import sanitize_content_type, sanitize_filename, sha256_hex, utc_now_iso
 
 
 def init_db(db_path: Path) -> None:
@@ -109,12 +113,56 @@ def init_db(db_path: Path) -> None:
     )
     _ensure_mousetrap_attachment_blob_columns(conn)
     _ensure_mousetrap_config_columns(conn)
+    _ensure_audit_table(conn)
     conn.commit()
     conn.close()
 
 
 def _utc_now() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def _ensure_audit_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_account_id INTEGER,
+            actor_username TEXT NOT NULL,
+            actor_role TEXT NOT NULL,
+            action TEXT NOT NULL,
+            category TEXT NOT NULL,
+            target_type TEXT,
+            target_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created
+        ON admin_audit_log(created_at DESC, id DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor
+        ON admin_audit_log(actor_username, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_admin_audit_log_action
+        ON admin_audit_log(action, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_admin_audit_log_category
+        ON admin_audit_log(category, created_at DESC)
+        """
+    )
 
 
 def _ensure_mousetrap_config_columns(conn: sqlite3.Connection) -> None:
@@ -383,7 +431,7 @@ def insert_event(db_path: Path, event_type: str, sequence, payload: dict) -> Non
         INSERT INTO gateway_events (event_type, sequence, payload, created_at)
         VALUES (?, ?, ?, ?)
         """,
-        (event_type, sequence, json.dumps(payload), datetime.utcnow().isoformat()),
+        (event_type, sequence, json.dumps(payload), datetime.now(timezone.utc).replace(tzinfo=None).isoformat()),
     )
     _upsert_dm_message_event(conn, event_type=event_type, payload=payload)
     conn.commit()
@@ -612,8 +660,71 @@ def mark_dm_message_deleted(db_path: Path, message_id: str) -> None:
     conn.close()
 
 
-def regenerate_db(db_path: Path) -> int:
+def create_database_backup(
+    db_path: Path,
+    backup_dir: Path | None = None,
+    retention: int = 5,
+) -> Path | None:
+    """Create a consistent snapshot before destructive maintenance.
+
+    Backups contain all application data, including account hashes and DMs, so
+    the backup directory must be treated as sensitive and kept off public
+    static paths.
+    """
+    source_path = Path(db_path)
+    if not source_path.exists():
+        return None
+
+    target_dir = Path(backup_dir) if backup_dir else source_path.parent / "backups"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y%m%dT%H%M%S%fZ")
+    target_path = target_dir / f"{source_path.stem}-{stamp}.db"
+
+    source = sqlite3.connect(source_path)
+    destination = sqlite3.connect(target_path)
+    try:
+        source.backup(destination)
+        destination.commit()
+    finally:
+        destination.close()
+        source.close()
+
+    try:
+        os.chmod(target_path, 0o600)
+    except OSError:
+        pass
+
+    if retention > 0:
+        backups = sorted(
+            target_dir.glob(f"{source_path.stem}-*.db"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in backups[retention:]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+    return target_path
+
+
+def regenerate_db(
+    db_path: Path,
+    backup_dir: Path | None = None,
+    backup_retention: int = 5,
+) -> int:
+    """Delete captured gateway events after taking a verified backup.
+
+    User accounts, sessions, audit records, MouseTrap configuration and logs
+    are intentionally preserved.
+    """
     init_db(db_path)
+    create_database_backup(
+        db_path,
+        backup_dir=backup_dir,
+        retention=backup_retention,
+    )
 
     conn = sqlite3.connect(db_path)
     deleted_count = conn.execute("SELECT COUNT(*) FROM gateway_events").fetchone()[0]
@@ -622,6 +733,67 @@ def regenerate_db(db_path: Path) -> int:
     conn.close()
 
     return int(deleted_count)
+
+
+def prune_old_records(
+    db_path: Path,
+    event_retention_days: int = 0,
+    mousetrap_log_retention_days: int = 0,
+    audit_log_retention_days: int = 0,
+) -> dict[str, int]:
+    """Optionally prune old rows. A value of 0 disables pruning."""
+    removed = {"gateway_events": 0, "mousetrap_message_logs": 0, "admin_audit_log": 0}
+    if max(event_retention_days, mousetrap_log_retention_days, audit_log_retention_days) <= 0:
+        return removed
+
+    conn = sqlite3.connect(db_path)
+    try:
+        if event_retention_days > 0:
+            cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=event_retention_days)).isoformat()
+            cursor = conn.execute(
+                "DELETE FROM gateway_events WHERE created_at < ?",
+                (cutoff,),
+            )
+            removed["gateway_events"] = int(cursor.rowcount or 0)
+
+        if mousetrap_log_retention_days > 0:
+            cutoff = (
+                datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=mousetrap_log_retention_days)
+            ).isoformat()
+            old_ids = [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT id FROM mousetrap_message_logs WHERE occurred_at < ?",
+                    (cutoff,),
+                ).fetchall()
+            ]
+            if old_ids:
+                placeholders = ",".join("?" for _ in old_ids)
+                conn.execute(
+                    f"DELETE FROM mousetrap_message_attachment_blobs WHERE log_id IN ({placeholders})",
+                    old_ids,
+                )
+                cursor = conn.execute(
+                    f"DELETE FROM mousetrap_message_logs WHERE id IN ({placeholders})",
+                    old_ids,
+                )
+                removed["mousetrap_message_logs"] = int(cursor.rowcount or 0)
+
+        if audit_log_retention_days > 0:
+            cutoff = (
+                datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=audit_log_retention_days)
+            ).isoformat()
+            cursor = conn.execute(
+                "DELETE FROM admin_audit_log WHERE created_at < ?",
+                (cutoff,),
+            )
+            removed["admin_audit_log"] = int(cursor.rowcount or 0)
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return removed
 
 
 def delete_mousetrap_config(db_path: Path, guild_id: str) -> None:
@@ -798,11 +970,17 @@ def insert_mousetrap_message_log(
         if not isinstance(blob_value, (bytes, bytearray)):
             continue
 
+        cached_content_type = normalize_media_content_type(
+            attachment.get("cached_content_type") or attachment.get("content_type")
+        )
+        if not is_allowed_media_type(cached_content_type):
+            continue
+
         attachment_rows.append(
             (
                 index,
-                str(attachment.get("filename") or "") or None,
-                str(attachment.get("cached_content_type") or attachment.get("content_type") or "") or None,
+                sanitize_filename(attachment.get("filename")),
+                cached_content_type,
                 int(attachment.get("cached_size") or len(blob_value)),
                 bytes(blob_value),
                 _utc_now(),
@@ -817,6 +995,16 @@ def insert_mousetrap_message_log(
         sanitized_attachment = dict(attachment)
         sanitized_attachment.pop("cached_blob", None)
         sanitized_attachment.pop("cached_data_url", None)
+        sanitized_attachment["filename"] = sanitize_filename(
+            attachment.get("filename")
+        )
+        sanitized_attachment["content_type"] = sanitize_content_type(
+            attachment.get("content_type")
+        )
+        if attachment.get("cached_content_type"):
+            sanitized_attachment["cached_content_type"] = sanitize_content_type(
+                attachment.get("cached_content_type")
+            )
         sanitized_attachments.append(sanitized_attachment)
 
     conn = sqlite3.connect(db_path)
@@ -908,27 +1096,32 @@ def list_mousetrap_message_logs(db_path: Path, guild_id: str, channel_id: str | 
     ).fetchall()
     blob_rows.close()
 
-    attachment_map: dict[int, list[dict]] = {}
+    attachment_map: dict[int, dict[int, dict]] = {}
     for blob_row in blob_rows_data:
         log_id = int(blob_row["log_id"])
-        content_type = str(blob_row["content_type"] or "")
+        attachment_index = int(blob_row["attachment_index"])
+        content_type = normalize_media_content_type(blob_row["content_type"])
         blob_value = blob_row["blob"]
         data_url = None
-        if blob_value is not None and content_type:
+        if (
+            blob_value is not None
+            and is_allowed_media_type(content_type)
+            and isinstance(blob_value, (bytes, bytearray, memoryview))
+        ):
             if isinstance(blob_value, memoryview):
                 blob_value = blob_value.tobytes()
-            if isinstance(blob_value, (bytes, bytearray)):
-                data_url = f"data:{content_type};base64,{base64.b64encode(bytes(blob_value)).decode('ascii')}"
+            data_url = (
+                f"data:{content_type};base64,"
+                f"{base64.b64encode(bytes(blob_value)).decode('ascii')}"
+            )
 
-        attachment_map.setdefault(log_id, []).append(
-            {
-                "filename": blob_row["filename"],
-                "content_type": content_type or None,
-                "cached_content_type": content_type or None,
-                "cached_size": blob_row["size"],
-                "cached_data_url": data_url,
-            }
-        )
+        attachment_map.setdefault(log_id, {})[attachment_index] = {
+            "filename": sanitize_filename(blob_row["filename"]),
+            "content_type": content_type or None,
+            "cached_content_type": content_type or None,
+            "cached_size": blob_row["size"],
+            "cached_data_url": data_url,
+        }
 
     logs: list[dict] = []
     for row in rows:
@@ -939,12 +1132,23 @@ def list_mousetrap_message_logs(db_path: Path, guild_id: str, channel_id: str | 
         except json.JSONDecodeError:
             attachments = []
 
-        cached_attachments = attachment_map.get(int(row["id"]), [])
+        cached_attachments = attachment_map.get(int(row["id"]), {})
         for index, attachment in enumerate(attachments):
             if not isinstance(attachment, dict):
                 continue
-            if index < len(cached_attachments) and cached_attachments[index].get("cached_data_url"):
-                attachment.update(cached_attachments[index])
+            attachment.pop("cached_blob", None)
+            attachment.pop("cached_data_url", None)
+            attachment["filename"] = sanitize_filename(attachment.get("filename"))
+            attachment["content_type"] = sanitize_content_type(
+                attachment.get("content_type")
+            )
+            if attachment.get("cached_content_type"):
+                attachment["cached_content_type"] = sanitize_content_type(
+                    attachment.get("cached_content_type")
+                )
+            cached_attachment = cached_attachments.get(index)
+            if cached_attachment and cached_attachment.get("cached_data_url"):
+                attachment.update(cached_attachment)
 
         logs.append(
             {
@@ -962,7 +1166,19 @@ def list_mousetrap_message_logs(db_path: Path, guild_id: str, channel_id: str | 
     return logs
 
 
-def init_account_db(db_path: Path) -> None:
+def _panel_sessions_need_migration(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute("PRAGMA table_info(panel_sessions)").fetchall()
+    if not rows:
+        return False
+    columns = {str(row[1]) for row in rows}
+    return "token" in columns and "token_hash" not in columns
+
+
+def init_account_db(
+    db_path: Path,
+    backup_dir: Path | str | None = None,
+    backup_retention: int = 5,
+) -> None:
     conn = sqlite3.connect(db_path)
     conn.execute(
         """
@@ -983,10 +1199,21 @@ def init_account_db(db_path: Path) -> None:
         ON panel_accounts(role)
         """
     )
+    if _panel_sessions_need_migration(conn):
+        # The token-hash migration rebuilds the session table. Take a
+        # consistent snapshot first so a failed or interrupted deployment can
+        # be restored without logging every user out.
+        conn.commit()
+        create_database_backup(
+            db_path,
+            backup_dir=backup_dir,
+            retention=backup_retention,
+        )
+    _migrate_panel_sessions(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS panel_sessions (
-            token TEXT PRIMARY KEY,
+            token_hash TEXT PRIMARY KEY,
             username TEXT NOT NULL,
             role TEXT NOT NULL,
             account_id INTEGER,
@@ -1009,8 +1236,80 @@ def init_account_db(db_path: Path) -> None:
         ON panel_sessions(revoked, expires_at)
         """
     )
+    _ensure_audit_table(conn)
     conn.commit()
     conn.close()
+
+
+def _migrate_panel_sessions(conn: sqlite3.Connection) -> None:
+    """Hash existing plaintext session tokens without invalidating sessions.
+
+    The legacy ``token`` column is replaced by ``token_hash``. The session
+    cookie value itself is unchanged, so a SHA-256 lookup of the presented
+    token continues to resolve the same session.
+    """
+    rows = conn.execute("PRAGMA table_info(panel_sessions)").fetchall()
+    if not rows:
+        return
+
+    existing_columns = {str(row[1]) for row in rows}
+    if "token_hash" in existing_columns:
+        return
+    if "token" not in existing_columns:
+        return
+
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        legacy_rows = conn.execute(
+            """
+            SELECT token, username, role, account_id, issued_at, expires_at, revoked, revoked_at
+            FROM panel_sessions
+            """
+        ).fetchall()
+        conn.execute(
+            """
+            CREATE TABLE panel_sessions_migrated (
+                token_hash TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                role TEXT NOT NULL,
+                account_id INTEGER,
+                issued_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                revoked INTEGER NOT NULL DEFAULT 0,
+                revoked_at TEXT
+            )
+            """
+        )
+        for row in legacy_rows:
+            token = str(row[0] or "")
+            if not token:
+                continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO panel_sessions_migrated (
+                    token_hash, username, role, account_id,
+                    issued_at, expires_at, revoked, revoked_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sha256_hex(token),
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                    row[7],
+                ),
+            )
+        conn.execute("DROP TABLE panel_sessions")
+        conn.execute("ALTER TABLE panel_sessions_migrated RENAME TO panel_sessions")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def insert_panel_session(
@@ -1025,25 +1324,26 @@ def insert_panel_session(
     conn = sqlite3.connect(db_path)
     conn.execute(
         """
-        INSERT INTO panel_sessions (token, username, role, account_id, issued_at, expires_at, revoked, revoked_at)
+        INSERT INTO panel_sessions (token_hash, username, role, account_id, issued_at, expires_at, revoked, revoked_at)
         VALUES (?, ?, ?, ?, ?, ?, 0, NULL)
         """,
-        (token, username, role, account_id, issued_at, expires_at),
+        (sha256_hex(token), username, role, account_id, issued_at, expires_at),
     )
     conn.commit()
     conn.close()
 
 
 def get_panel_session_by_token(db_path: Path, token: str) -> dict | None:
+    token_hash = sha256_hex(token)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         """
-        SELECT token, username, role, account_id, issued_at, expires_at, revoked
+        SELECT token_hash, username, role, account_id, issued_at, expires_at, revoked
         FROM panel_sessions
-        WHERE token = ?
+        WHERE token_hash = ?
         """,
-        (token,),
+        (token_hash,),
     ).fetchone()
     conn.close()
 
@@ -1051,7 +1351,7 @@ def get_panel_session_by_token(db_path: Path, token: str) -> dict | None:
         return None
 
     return {
-        "token": str(row["token"]),
+        "token_hash": str(row["token_hash"]),
         "username": str(row["username"]),
         "role": str(row["role"]),
         "account_id": row["account_id"],
@@ -1067,9 +1367,9 @@ def revoke_panel_session_by_token(db_path: Path, token: str, revoked_at: str) ->
         """
         UPDATE panel_sessions
         SET revoked = 1, revoked_at = ?
-        WHERE token = ? AND revoked = 0
+        WHERE token_hash = ? AND revoked = 0
         """,
-        (revoked_at, token),
+        (revoked_at, sha256_hex(token)),
     )
     conn.commit()
     conn.close()
@@ -1088,9 +1388,9 @@ def revoke_panel_sessions_by_username(
             """
             UPDATE panel_sessions
             SET revoked = 1, revoked_at = ?
-            WHERE lower(username) = lower(?) AND revoked = 0 AND token != ?
+            WHERE lower(username) = lower(?) AND revoked = 0 AND token_hash != ?
             """,
-            (revoked_at, username, exclude_token),
+            (revoked_at, username, sha256_hex(exclude_token)),
         )
     else:
         result = conn.execute(
@@ -1229,10 +1529,10 @@ def insert_panel_account(
     permissions_json: str,
     created_at: str,
     updated_at: str,
-) -> bool:
+) -> int | None:
     conn = sqlite3.connect(db_path)
     try:
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO panel_accounts (username, password_hash, role, permissions_json, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -1240,11 +1540,12 @@ def insert_panel_account(
             (username, password_hash, role, permissions_json, created_at, updated_at),
         )
         conn.commit()
+        account_id = int(cursor.lastrowid)
         conn.close()
-        return True
+        return account_id
     except sqlite3.IntegrityError:
         conn.close()
-        return False
+        return None
 
 
 def update_panel_account_permissions(db_path: Path, account_id: int, permissions_json: str, updated_at: str) -> int:
@@ -1275,3 +1576,208 @@ def update_panel_account_password(db_path: Path, account_id: int, password_hash:
     conn.commit()
     conn.close()
     return int(result.rowcount or 0)
+
+
+def insert_audit_event(
+    db_path: Path,
+    *,
+    actor_account_id: int | None,
+    actor_username: str,
+    actor_role: str,
+    action: str,
+    category: str,
+    target_type: str | None,
+    target_id: str | None,
+    metadata_json: str,
+    created_at: str,
+) -> int:
+    conn = sqlite3.connect(db_path)
+    cursor = conn.execute(
+        """
+        INSERT INTO admin_audit_log (
+            actor_account_id,
+            actor_username,
+            actor_role,
+            action,
+            category,
+            target_type,
+            target_id,
+            metadata_json,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            actor_account_id,
+            actor_username,
+            actor_role,
+            action,
+            category,
+            target_type,
+            target_id,
+            metadata_json,
+            created_at,
+        ),
+    )
+    conn.commit()
+    event_id = int(cursor.lastrowid)
+    conn.close()
+    return event_id
+
+
+def _audit_where_clause(
+    *,
+    category: str | None = None,
+    action: str | None = None,
+    actor: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    query: str | None = None,
+) -> tuple[str, list[object]]:
+    clauses: list[str] = []
+    params: list[object] = []
+
+    if category:
+        clauses.append("category = ?")
+        params.append(category)
+    if action:
+        clauses.append("action = ?")
+        params.append(action)
+    if actor:
+        clauses.append("lower(actor_username) = lower(?)")
+        params.append(actor)
+    if target_type:
+        clauses.append("target_type = ?")
+        params.append(target_type)
+    if target_id:
+        clauses.append("target_id = ?")
+        params.append(target_id)
+    if from_ts:
+        clauses.append("created_at >= ?")
+        params.append(from_ts)
+    if to_ts:
+        clauses.append("created_at <= ?")
+        params.append(to_ts)
+    if query:
+        escaped = (
+            query.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        clauses.append(
+            "(actor_username LIKE ? ESCAPE '\\' OR action LIKE ? ESCAPE '\\' "
+            "OR target_type LIKE ? ESCAPE '\\' OR target_id LIKE ? ESCAPE '\\')"
+        )
+        params.extend([pattern, pattern, pattern, pattern])
+
+    if not clauses:
+        return "", params
+    return " WHERE " + " AND ".join(clauses), params
+
+
+def list_audit_events(
+    db_path: Path,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    category: str | None = None,
+    action: str | None = None,
+    actor: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    query: str | None = None,
+) -> tuple[list[dict], int]:
+    safe_limit = max(1, min(int(limit), 100))
+    safe_offset = max(0, int(offset))
+    where_clause, params = _audit_where_clause(
+        category=category,
+        action=action,
+        actor=actor,
+        target_type=target_type,
+        target_id=target_id,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        query=query,
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    total = int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM admin_audit_log{where_clause}",
+            params,
+        ).fetchone()[0]
+    )
+    rows = conn.execute(
+        f"""
+        SELECT id, actor_account_id, actor_username, actor_role, action, category,
+               target_type, target_id, metadata_json, created_at
+        FROM admin_audit_log{where_clause}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ? OFFSET ?
+        """,
+        (*params, safe_limit, safe_offset),
+    ).fetchall()
+    conn.close()
+
+    events = [
+        {
+            "id": int(row["id"]),
+            "actor_account_id": row["actor_account_id"],
+            "actor_username": str(row["actor_username"]),
+            "actor_role": str(row["actor_role"]),
+            "action": str(row["action"]),
+            "category": str(row["category"]),
+            "target_type": row["target_type"],
+            "target_id": row["target_id"],
+            "metadata_json": str(row["metadata_json"] or "{}"),
+            "created_at": str(row["created_at"]),
+        }
+        for row in rows
+    ]
+    return events, total
+
+
+def list_audit_actions(db_path: Path) -> list[str]:
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT DISTINCT action FROM admin_audit_log ORDER BY action ASC"
+    ).fetchall()
+    conn.close()
+    return [str(row[0]) for row in rows if row and row[0]]
+
+
+def get_audit_event(db_path: Path, event_id: int) -> dict | None:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """
+        SELECT id, actor_account_id, actor_username, actor_role, action, category,
+               target_type, target_id, metadata_json, created_at
+        FROM admin_audit_log
+        WHERE id = ?
+        """,
+        (event_id,),
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    return {
+        "id": int(row["id"]),
+        "actor_account_id": row["actor_account_id"],
+        "actor_username": str(row["actor_username"]),
+        "actor_role": str(row["actor_role"]),
+        "action": str(row["action"]),
+        "category": str(row["category"]),
+        "target_type": row["target_type"],
+        "target_id": row["target_id"],
+        "metadata_json": str(row["metadata_json"] or "{}"),
+        "created_at": str(row["created_at"]),
+    }

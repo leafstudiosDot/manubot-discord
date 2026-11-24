@@ -7,6 +7,7 @@ type SideMenuProps = {
   canViewDirectMessages: boolean;
   canViewServers: boolean;
   canViewAccounts: boolean;
+  canViewAudit: boolean;
   canViewDangerZone: boolean;
 };
 
@@ -16,6 +17,7 @@ function SideMenu({
   canViewDirectMessages,
   canViewServers,
   canViewAccounts,
+  canViewAudit,
   canViewDangerZone,
 }: SideMenuProps) {
   const navItemBase =
@@ -70,6 +72,21 @@ function SideMenu({
               }
             >
               Servers
+            </NavLink>
+          )}
+          {canViewAudit && (
+            <NavLink
+              to="/audit-logs"
+              onClick={onNavigate}
+              end
+              className={({ isActive }) =>
+                `${navItemBase} ${isActive
+                  ? "bg-gray-600 text-white"
+                  : "bg-gray-500 text-white hover:bg-gray-600"
+                }`
+              }
+            >
+              Audit Logs
             </NavLink>
           )}
           {canViewAccounts && (

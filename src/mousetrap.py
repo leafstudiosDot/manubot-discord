@@ -1,11 +1,12 @@
 import asyncio
 import json
+import logging
 import mimetypes
 
 import aiohttp
 
+from config import Settings
 from database import (
-    delete_mousetrap_config,
     get_mousetrap_config,
     increment_mousetrap_kick_count,
     insert_mousetrap_message_log,
@@ -13,79 +14,228 @@ from database import (
     update_mousetrap_notice_target,
 )
 from discord import delete_dm as delete_discord_message, edit_discord_message
+from media import (
+    content_type_matches_family,
+    is_allowed_media_type,
+    normalize_media_content_type,
+    sniff_media_family,
+    validate_attachment_url,
+)
+from security import sanitize_filename
 
 DISCORD_API_BASE = "https://discord.com/api"
-MAX_MOUSETTRAP_ATTACHMENT_CACHE_BYTES = 8 * 1024 * 1024
+LOGGER = logging.getLogger(__name__)
+REST_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_read=20)
+
+
+class _MessageAttachmentBudget:
+    """Track cached attachment bytes for a single message without races."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = max(0, int(limit))
+        self.used = 0
+        self._lock = asyncio.Lock()
+
+    async def reserve(self, size: int) -> bool:
+        if size <= 0:
+            return True
+        async with self._lock:
+            if self.used + size > self.limit:
+                return False
+            self.used += size
+            return True
 
 
 def _resolve_attachment_content_type(attachment: dict) -> str:
-    content_type = str(attachment.get("content_type") or "").strip()
-    if content_type:
+    content_type = normalize_media_content_type(attachment.get("content_type"))
+    if content_type != "application/octet-stream":
         return content_type
 
-    filename = str(attachment.get("filename") or "").strip()
+    filename = sanitize_filename(attachment.get("filename")) or ""
     guessed_type, _ = mimetypes.guess_type(filename)
-    return guessed_type or ""
+    return normalize_media_content_type(guessed_type)
 
 
-def _is_cacheable_mousetrap_attachment(attachment: dict) -> bool:
-    content_type = _resolve_attachment_content_type(attachment)
-    if not content_type.startswith(("image/", "video/")):
-        return False
-
+def _safe_attachment_size(attachment: dict) -> int:
     try:
-        size = int(attachment.get("size") or 0)
+        return max(0, int(attachment.get("size") or 0))
     except (TypeError, ValueError):
-        size = 0
-
-    return size <= MAX_MOUSETTRAP_ATTACHMENT_CACHE_BYTES
+        return 0
 
 
-async def _cache_mousetrap_attachment(session: aiohttp.ClientSession, attachment: dict) -> dict:
-    cached_attachment = dict(attachment)
-    if not _is_cacheable_mousetrap_attachment(cached_attachment):
+def _is_cacheable_mousetrap_attachment(attachment: dict, settings: Settings) -> bool:
+    content_type = _resolve_attachment_content_type(attachment)
+    if not is_allowed_media_type(content_type):
+        return False
+    return _safe_attachment_size(attachment) <= settings.mousetrap_max_attachment_bytes
+
+
+def _sanitized_attachment(attachment: dict) -> dict:
+    cached_attachment = {
+        key: value
+        for key, value in attachment.items()
+        if key
+        not in {
+            "cached_blob",
+            "cached_data_url",
+            "cached_content_type",
+            "cached_size",
+        }
+    }
+    cached_attachment["filename"] = sanitize_filename(attachment.get("filename"))
+    cached_attachment["content_type"] = normalize_media_content_type(
+        attachment.get("content_type")
+    )
+    for key in ("url", "proxy_url"):
+        if attachment.get(key) is not None:
+            cached_attachment[key] = str(attachment.get(key))[:2048]
+    return cached_attachment
+
+
+async def _download_attachment(
+    session: aiohttp.ClientSession,
+    source_url: str,
+    attachment: dict,
+    settings: Settings,
+    budget: _MessageAttachmentBudget,
+) -> dict:
+    cached_attachment = _sanitized_attachment(attachment)
+    ok, reason = validate_attachment_url(
+        source_url, settings.mousetrap_cdn_allowlist
+    )
+    if not ok:
+        LOGGER.info("Skipping MouseTrap attachment (%s)", reason)
         return cached_attachment
 
-    source_url = str(cached_attachment.get("proxy_url") or cached_attachment.get("url") or "").strip()
-    if not source_url:
-        return cached_attachment
+    timeout = aiohttp.ClientTimeout(
+        total=settings.mousetrap_download_timeout_seconds,
+        connect=settings.mousetrap_connect_timeout_seconds,
+        sock_read=settings.mousetrap_download_timeout_seconds,
+    )
 
     try:
-        async with session.get(source_url) as response:
-            if response.status >= 400:
+        async with session.get(
+            source_url,
+            allow_redirects=False,
+            timeout=timeout,
+        ) as response:
+            if response.status != 200:
+                LOGGER.info(
+                    "Skipping MouseTrap attachment (upstream status %s)",
+                    response.status,
+                )
                 return cached_attachment
 
-            content_type = str(response.headers.get("Content-Type") or _resolve_attachment_content_type(cached_attachment) or "").strip()
-            if not content_type.startswith(("image/", "video/")):
+            header_content_type = normalize_media_content_type(
+                response.headers.get("Content-Type")
+            )
+            content_type = (
+                header_content_type
+                if is_allowed_media_type(header_content_type)
+                else _resolve_attachment_content_type(cached_attachment)
+            )
+            if not is_allowed_media_type(content_type):
+                LOGGER.info("Skipping MouseTrap attachment (content type not allowed)")
                 return cached_attachment
 
             content_length = response.headers.get("Content-Length")
             if content_length:
                 try:
-                    if int(content_length) > MAX_MOUSETTRAP_ATTACHMENT_CACHE_BYTES:
+                    if int(content_length) > settings.mousetrap_max_attachment_bytes:
+                        LOGGER.info(
+                            "Skipping MouseTrap attachment (declared size too large)"
+                        )
                         return cached_attachment
                 except (TypeError, ValueError):
                     pass
 
-            raw_bytes = await response.read()
-            if len(raw_bytes) > MAX_MOUSETTRAP_ATTACHMENT_CACHE_BYTES:
+            chunks: list[bytes] = []
+            total = 0
+            first_bytes = b""
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > settings.mousetrap_max_attachment_bytes:
+                    LOGGER.info("Skipping MouseTrap attachment (stream too large)")
+                    return cached_attachment
+                if len(first_bytes) < 32:
+                    first_bytes += chunk[: 32 - len(first_bytes)]
+                chunks.append(bytes(chunk))
+
+            if not chunks:
                 return cached_attachment
 
-            cached_attachment["cached_blob"] = raw_bytes
+            family = sniff_media_family(first_bytes)
+            if not content_type_matches_family(content_type, family):
+                LOGGER.info("Skipping MouseTrap attachment (signature mismatch)")
+                return cached_attachment
+
+            if not await budget.reserve(total):
+                LOGGER.info(
+                    "Skipping MouseTrap attachment (message storage budget exhausted)"
+                )
+                return cached_attachment
+
+            cached_attachment["cached_blob"] = b"".join(chunks)
             cached_attachment["cached_content_type"] = content_type
-            cached_attachment["cached_size"] = len(raw_bytes)
+            cached_attachment["cached_size"] = total
+    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        LOGGER.info("Skipping MouseTrap attachment (%s)", type(err).__name__)
+        return cached_attachment
     except Exception:
+        LOGGER.exception("Unexpected error caching a MouseTrap attachment")
         return cached_attachment
 
     return cached_attachment
 
 
-async def cache_mousetrap_attachments(attachments: list[dict]) -> list[dict]:
+async def cache_mousetrap_attachments(
+    attachments: list[dict],
+    settings: Settings | None = None,
+) -> list[dict]:
     if not attachments:
         return []
 
-    async with aiohttp.ClientSession() as session:
-        return await asyncio.gather(*(_cache_mousetrap_attachment(session, attachment) for attachment in attachments))
+    resolved_settings = settings or Settings.from_env()
+    selected = [
+        attachment
+        for attachment in attachments[: resolved_settings.mousetrap_max_attachments]
+        if isinstance(attachment, dict)
+    ]
+    if not selected:
+        return []
+
+    budget = _MessageAttachmentBudget(resolved_settings.mousetrap_max_message_bytes)
+    semaphore = asyncio.Semaphore(
+        resolved_settings.mousetrap_max_concurrent_downloads
+    )
+    timeout = aiohttp.ClientTimeout(
+        total=resolved_settings.mousetrap_download_timeout_seconds,
+        connect=resolved_settings.mousetrap_connect_timeout_seconds,
+    )
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async def cache_one(attachment: dict) -> dict:
+            async with semaphore:
+                if not _is_cacheable_mousetrap_attachment(
+                    attachment, resolved_settings
+                ):
+                    return _sanitized_attachment(attachment)
+                source_url = str(
+                    attachment.get("proxy_url") or attachment.get("url") or ""
+                ).strip()
+                if not source_url:
+                    return _sanitized_attachment(attachment)
+                return await _download_attachment(
+                    session,
+                    source_url,
+                    attachment,
+                    resolved_settings,
+                    budget,
+                )
+
+        return list(await asyncio.gather(*(cache_one(item) for item in selected)))
 
 
 def build_mousetrap_notice_payload(kick_count: int) -> dict:
@@ -136,7 +286,7 @@ async def send_mousetrap_notice(token: str, channel_id: str, kick_count: int) ->
     headers = {"Authorization": f"Bot {token}"}
     payload = build_mousetrap_notice_payload(kick_count=kick_count)
 
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=REST_TIMEOUT) as session:
         async with session.post(
             f"{DISCORD_API_BASE}/channels/{channel_id}/messages",
             json=payload,
@@ -170,7 +320,7 @@ async def kick_guild_member(token: str, guild_id: str, user_id: str, reason: str
     if reason:
         params["reason"] = reason
 
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=REST_TIMEOUT) as session:
         async with session.delete(
             f"{DISCORD_API_BASE}/guilds/{guild_id}/members/{user_id}",
             params=params or None,
@@ -193,7 +343,7 @@ async def delete_discord_message(token: str, channel_id: str, message_id: str) -
         raise RuntimeError("channel_id and message_id are required")
 
     headers = {"Authorization": f"Bot {token}"}
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=REST_TIMEOUT) as session:
         async with session.delete(f"https://discord.com/api/channels/{channel_id}/messages/{message_id}") as response:
             if response.status >= 400:
                 raw = await response.text()
@@ -211,7 +361,7 @@ async def fetch_discord_user_profile(token: str, user_id: str) -> dict | None:
         return None
 
     headers = {"Authorization": f"Bot {token}"}
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=REST_TIMEOUT) as session:
         async with session.get(f"{DISCORD_API_BASE}/users/{user_id}") as response:
             if response.status >= 400:
                 return None
@@ -354,7 +504,13 @@ async def set_mousetrap_channel(token: str, db_path, guild_id: str, channel_id: 
     }
 
 
-async def handle_guild_message(token: str, db_path, payload: dict) -> None:
+async def handle_guild_message(
+    token: str,
+    db_path,
+    payload: dict,
+    settings: Settings | None = None,
+) -> None:
+    resolved_settings = settings or Settings.from_env()
     data = payload.get("d") or {}
     if not isinstance(data, dict):
         return
@@ -380,16 +536,20 @@ async def handle_guild_message(token: str, db_path, payload: dict) -> None:
         return
 
     occurred_at = str(data.get("timestamp") or "")
-    content = str(data.get("content") or "")
+    content = str(data.get("content") or "")[:4000]
     attachments = data.get("attachments") or []
     if not isinstance(attachments, list):
         attachments = []
+    attachments = attachments[: resolved_settings.mousetrap_max_attachments]
 
     cached_attachments = []
     try:
-        cached_attachments = await cache_mousetrap_attachments(attachments)
+        cached_attachments = await cache_mousetrap_attachments(
+            attachments, settings=resolved_settings
+        )
     except Exception:
-        cached_attachments = attachments
+        LOGGER.exception("MouseTrap attachment caching failed")
+        cached_attachments = [_sanitized_attachment(item) for item in attachments if isinstance(item, dict)]
 
     message_id = str(data.get("id") or "")
     if message_id:

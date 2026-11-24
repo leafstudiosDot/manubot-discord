@@ -1,12 +1,16 @@
 import asyncio
 import json
+import logging
 
 import aiohttp
 import websockets
 
-
 GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 DISCORD_API_BASE = "https://discord.com/api"
+LOGGER = logging.getLogger(__name__)
+
+REST_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5, sock_read=20)
+GATEWAY_MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 
 
 def _cdn_asset_url(path: str, asset_hash: str | None) -> str | None:
@@ -21,7 +25,7 @@ async def refresh_bot_profile(token: str, bot_state: dict) -> None:
     headers = {"Authorization": f"Bot {token}"}
     app_id = bot_state.get("app_id")
 
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=REST_TIMEOUT) as session:
         user_data = None
         application_data = None
         guild_data = None
@@ -87,7 +91,7 @@ async def refresh_bot_profile(token: str, bot_state: dict) -> None:
 
     guilds.sort(key=lambda item: item["name"].lower())
 
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=REST_TIMEOUT) as session:
         for guild in guilds:
             guild_id = guild.get("id")
             if not guild_id:
@@ -137,20 +141,33 @@ def dm_event(event_type: str, payload: dict) -> bool:
 
 
 async def heartbeat(ws, interval):
-    while True:
-        await asyncio.sleep(interval / 1000)  # interval is in ms
-        await ws.send(json.dumps({"op": 1, "d": None}))
+    try:
+        while True:
+            await asyncio.sleep(interval / 1000)  # interval is in ms
+            await ws.send(json.dumps({"op": 1, "d": None}))
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Let the receive loop observe the closed socket and reconnect.
+        LOGGER.debug("Gateway heartbeat stopped", exc_info=True)
 
 
 async def run(token: str, bot_state: dict, save_event, handle_guild_message=None):
     activity_state = str(bot_state.get("version") or "v0.0.0")
 
-    async with websockets.connect(GATEWAY_URL) as ws:
+    async with websockets.connect(
+        GATEWAY_URL,
+        open_timeout=10,
+        close_timeout=5,
+        ping_interval=30,
+        ping_timeout=10,
+        max_size=GATEWAY_MAX_MESSAGE_BYTES,
+    ) as ws:
         hello_event = await ws.recv()
         hello_data = json.loads(hello_event)
         interval = hello_data["d"]["heartbeat_interval"]
 
-        asyncio.create_task(heartbeat(ws, interval))
+        heartbeat_task = asyncio.create_task(heartbeat(ws, interval))
 
         identify_payload = {
             "op": 2,
@@ -185,33 +202,47 @@ async def run(token: str, bot_state: dict, save_event, handle_guild_message=None
 
         try:
             await refresh_bot_profile(token, bot_state)
-        except Exception as err:
-            print(f"Failed to refresh bot profile: {err}")
+        except Exception:
+            LOGGER.exception("Failed to refresh bot profile")
 
-        print("Manubot for Discord is connected and running as online.")
+        LOGGER.info("Manubot for Discord is connected and running as online.")
 
-        while True:
-            raw_message = await ws.recv()
-            payload = json.loads(raw_message)
+        try:
+            while True:
+                raw_message = await ws.recv()
+                try:
+                    payload = json.loads(raw_message)
+                except (TypeError, ValueError):
+                    LOGGER.warning("Ignoring malformed Discord gateway payload")
+                    continue
+                if not isinstance(payload, dict):
+                    continue
 
-            op = payload.get("op")
-            event_type = payload.get("t") or f"OP_{op}"
-            sequence = payload.get("s")
-            bot_state["last_sequence"] = sequence
+                op = payload.get("op")
+                event_type = payload.get("t") or f"OP_{op}"
+                sequence = payload.get("s")
+                bot_state["last_sequence"] = sequence
 
-            if event_type != "OP_11":
-                print(f"[Gateway] {event_type} seq={sequence}")
+                if event_type != "OP_11":
+                    LOGGER.debug("Gateway event %s seq=%s", event_type, sequence)
 
-            if event_type == "MESSAGE_CREATE" and handle_guild_message:
-                data = payload.get("d") or {}
-                if isinstance(data, dict) and data.get("guild_id") is not None:
-                    try:
-                        await handle_guild_message(payload)
-                    except Exception as err:
-                        print(f"MouseTrap handling failed: {err}")
+                if event_type == "MESSAGE_CREATE" and handle_guild_message:
+                    data = payload.get("d") or {}
+                    if isinstance(data, dict) and data.get("guild_id") is not None:
+                        try:
+                            await handle_guild_message(payload)
+                        except Exception:
+                            LOGGER.exception("MouseTrap handling failed")
 
-            if dm_event(event_type, payload):
-                save_event(event_type, sequence, payload)
+                if dm_event(event_type, payload):
+                    save_event(event_type, sequence, payload)
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            bot_state["connected"] = False
 
 
 async def runbot(token: str, bot_state: dict, save_event, handle_guild_message=None):
@@ -220,7 +251,7 @@ async def runbot(token: str, bot_state: dict, save_event, handle_guild_message=N
             await run(token=token, bot_state=bot_state, save_event=save_event, handle_guild_message=handle_guild_message)
         except Exception as err:
             bot_state["connected"] = False
-            print(f"Discord connection dropped: {err}")
+            LOGGER.warning("Discord connection dropped (%s)", type(err).__name__)
             await asyncio.sleep(5)
 
 
@@ -253,7 +284,7 @@ async def send_dm(token: str, user_id: str, content: str | None = None, files: l
 
     headers = {"Authorization": f"Bot {token}"}
 
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=REST_TIMEOUT) as session:
         channel_data = await _discord_request_json(
             session,
             "POST",
@@ -318,7 +349,7 @@ async def delete_dm(token: str, channel_id: str, message_id: str) -> None:
         raise RuntimeError("channel_id and message_id are required")
 
     headers = {"Authorization": f"Bot {token}"}
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=REST_TIMEOUT) as session:
         async with session.delete(f"{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}") as response:
             if response.status >= 400:
                 raw = await response.text()
@@ -338,7 +369,7 @@ async def edit_discord_message(token: str, channel_id: str, message_id: str, pay
         raise RuntimeError("channel_id and message_id are required")
 
     headers = {"Authorization": f"Bot {token}"}
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=REST_TIMEOUT) as session:
         async with session.patch(
             f"{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}",
             json=payload,
@@ -361,7 +392,7 @@ async def get_guild_channels(token: str, guild_id: str) -> list[dict]:
         raise RuntimeError("guild_id is required")
 
     headers = {"Authorization": f"Bot {token}"}
-    async with aiohttp.ClientSession(headers=headers) as session:
+    async with aiohttp.ClientSession(headers=headers, timeout=REST_TIMEOUT) as session:
         async with session.get(f"{DISCORD_API_BASE}/guilds/{guild_id}/channels") as response:
             raw = await response.text()
             if response.status >= 400:

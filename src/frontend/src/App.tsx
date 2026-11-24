@@ -7,8 +7,10 @@ import DirectMessages from "./routes/DirectMessages";
 import Servers from "./routes/Servers";
 import MouseTrap from "./routes/MouseTrap";
 import Accounts from "./routes/Accounts";
+import AuditLogs from "./routes/AuditLogs";
 import DangerZone from "./routes/DangerZone";
 import NotFound from "./routes/NotFound";
+import { apiFetch, clearCsrfToken, setCsrfToken } from "./api";
 import { APP_VERSION } from "./version";
 
 type PermissionMap = Record<string, boolean>;
@@ -18,6 +20,7 @@ type AuthSession = {
   role: "superadmin" | "admin" | "moderator";
   permissions: PermissionMap;
   expires_at: string;
+  csrf_token?: string;
 };
 
 function buildWsUrl(path: string) {
@@ -53,17 +56,19 @@ function App() {
 
     const loadSession = async () => {
       try {
-        const response = await fetch("/api/auth/session");
+        const response = await apiFetch("/api/auth/session");
         if (!response.ok) {
           throw new Error("Not authenticated");
         }
         const data = await response.json();
         if (!cancelled) {
+          setCsrfToken(data?.session?.csrf_token);
           setSession(data?.session || null);
           setLoginError(null);
         }
       } catch {
         if (!cancelled) {
+          clearCsrfToken();
           setSession(null);
         }
       } finally {
@@ -86,7 +91,7 @@ function App() {
     setLoginError(null);
 
     try {
-      const response = await fetch("/api/auth/login", {
+      const response = await apiFetch("/api/auth/login", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -102,9 +107,11 @@ function App() {
         throw new Error(data?.message || "Login failed");
       }
 
+      setCsrfToken(data?.session?.csrf_token);
       setSession(data?.session || null);
       setLoginPassword("");
     } catch (err) {
+      clearCsrfToken();
       setLoginError(err instanceof Error ? err.message : "Login failed");
       setSession(null);
     } finally {
@@ -114,10 +121,11 @@ function App() {
 
   const handleLogout = async () => {
     try {
-      await fetch("/api/auth/logout", { method: "POST" });
+      await apiFetch("/api/auth/logout", { method: "POST" });
     } catch (err) {
       console.error("Logout failed", err);
     } finally {
+      clearCsrfToken();
       setSession(null);
       setEvents([]);
       setHealth(null);
@@ -125,6 +133,7 @@ function App() {
   };
 
   const handleSessionRevoked = () => {
+    clearCsrfToken();
     setSession(null);
     setEvents([]);
     setHealth(null);
@@ -356,7 +365,8 @@ function App() {
           onNavigate={() => setIsMenuOpen(false)}
           canViewDirectMessages={hasPermission("direct_messages_read")}
           canViewServers={hasPermission("servers_view")}
-          canViewAccounts={true}
+          canViewAccounts={hasPermission("accounts_view")}
+          canViewAudit={hasPermission("audit_view")}
           canViewDangerZone={true}
         />
 
@@ -407,6 +417,10 @@ function App() {
                   canManageModerators={session.role === "superadmin" || session.role === "admin"}
                 />
               }
+            />
+            <Route
+              path="/audit-logs"
+              element={<AuditLogs canView={hasPermission("audit_view")} />}
             />
             <Route path="*" element={<NotFound />} />
           </Routes>

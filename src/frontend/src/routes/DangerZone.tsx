@@ -1,5 +1,6 @@
 import { useState } from "react";
 import Prompt from "../components/prompt";
+import { apiFetch } from "../api";
 
 type DangerZoneProps = {
   canRegenerate: boolean;
@@ -23,7 +24,7 @@ function DangerZone({ canRegenerate, canRevokeAll, canRevokeAllGlobal, onSession
     setWorking(true);
     setResult("");
     try {
-      const response = await fetch("/api/database/regenerate", { method: "DELETE" });
+      const response = await apiFetch("/api/database/regenerate", { method: "DELETE" });
       const data = await response.json();
 
       if (!response.ok) {
@@ -43,7 +44,7 @@ function DangerZone({ canRegenerate, canRevokeAll, canRevokeAllGlobal, onSession
     setRevoking(true);
     setRevokeResult("");
     try {
-      const response = await fetch("/api/sessions/revoke-all", { method: "POST" });
+      const response = await apiFetch("/api/sessions/revoke-all", { method: "POST" });
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
@@ -64,7 +65,7 @@ function DangerZone({ canRegenerate, canRevokeAll, canRevokeAllGlobal, onSession
     setRevokingGlobal(true);
     setGlobalRevokeResult("");
     try {
-      const response = await fetch("/api/sessions/revoke-all-global", { method: "POST" });
+      const response = await apiFetch("/api/sessions/revoke-all-global", { method: "POST" });
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {

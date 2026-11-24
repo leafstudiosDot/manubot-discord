@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { apiFetch } from "../api";
 
 const MODERATOR_PERMISSIONS = [
     { key: "events_view", label: "View gateway events" },
@@ -6,6 +7,7 @@ const MODERATOR_PERMISSIONS = [
     { key: "direct_messages_read", label: "Read direct messages" },
     { key: "direct_messages_send", label: "Send direct messages" },
     { key: "direct_messages_delete", label: "Delete bot direct messages" },
+    { key: "audit_view", label: "View activity audit log" },
 ];
 
 type Account = {
@@ -57,7 +59,7 @@ function Accounts({ role, username, canView, canCreate, canManageModerators }: A
 
         setLoading(true);
         try {
-            const response = await fetch("/api/accounts");
+            const response = await apiFetch("/api/accounts");
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
                 throw new Error(data?.message || "Failed to load accounts");
@@ -83,7 +85,7 @@ function Accounts({ role, username, canView, canCreate, canManageModerators }: A
         setCreateMessage(null);
 
         try {
-            const response = await fetch("/api/accounts", {
+            const response = await apiFetch("/api/accounts", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -132,7 +134,7 @@ function Accounts({ role, username, canView, canCreate, canManageModerators }: A
         setSaveMessage(null);
 
         try {
-            const response = await fetch(`/api/accounts/${account.id}/permissions`, {
+            const response = await apiFetch(`/api/accounts/${account.id}/permissions`, {
                 method: "PATCH",
                 headers: {
                     "Content-Type": "application/json",
@@ -178,7 +180,7 @@ function Accounts({ role, username, canView, canCreate, canManageModerators }: A
         setOwnMessage(null);
 
         try {
-            const response = await fetch("/api/accounts/change-own-password", {
+            const response = await apiFetch("/api/accounts/change-own-password", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -216,7 +218,7 @@ function Accounts({ role, username, canView, canCreate, canManageModerators }: A
         setPasswordResetMessage(null);
 
         try {
-            const response = await fetch(`/api/accounts/${account.id}/password`, {
+            const response = await apiFetch(`/api/accounts/${account.id}/password`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",

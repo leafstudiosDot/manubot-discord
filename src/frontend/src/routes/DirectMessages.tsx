@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import Prompt from "../components/prompt";
+import { apiFetch } from "../api";
+import { safeHttpUrl } from "../urls";
 
 type DmUser = {
     user_id: string;
@@ -144,6 +146,17 @@ function DirectMessages({ loading, canRead, canSend, canDelete }) {
 
     const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         const picked = event.target.files ? Array.from(event.target.files) : [];
+        if (picked.length > 10) {
+            setSendError("At most 10 files can be attached to one message");
+            setFiles([]);
+            return;
+        }
+        if (picked.some((file) => file.size > 8 * 1024 * 1024)) {
+            setSendError("Each file must be 8 MB or smaller");
+            setFiles([]);
+            return;
+        }
+        setSendError(null);
         setFiles(picked);
     };
 
@@ -176,7 +189,7 @@ function DirectMessages({ loading, canRead, canSend, canDelete }) {
                 formData.append("files", file);
             });
 
-            const response = await fetch("/api/direct-messages/send", {
+            const response = await apiFetch("/api/direct-messages/send", {
                 method: "POST",
                 body: formData,
             });
@@ -301,7 +314,7 @@ function DirectMessages({ loading, canRead, canSend, canDelete }) {
 
         setDeleteBusy(true);
         try {
-            const response = await fetch(`/api/direct-messages/messages/${encodeURIComponent(pendingDeleteMessage.message_id)}`, {
+            const response = await apiFetch(`/api/direct-messages/messages/${encodeURIComponent(pendingDeleteMessage.message_id)}`, {
                 method: "DELETE",
             });
             const data = await response.json().catch(() => ({}));
@@ -492,11 +505,11 @@ function DirectMessages({ loading, canRead, canSend, canDelete }) {
                                                                     <ul className="mb-0 mt-1 list-disc pl-4 text-[11px] text-slate-600">
                                                                         {message.attachments.map((attachment, index) => (
                                                                             <li key={`${message.message_id}-${index}`}>
-                                                                                {attachment.url ? (
+                                                                                {safeHttpUrl(attachment.url) ? (
                                                                                     <a
-                                                                                        href={attachment.url}
+                                                                                        href={safeHttpUrl(attachment.url) || undefined}
                                                                                         target="_blank"
-                                                                                        rel="noreferrer"
+                                                                                        rel="noreferrer noopener"
                                                                                         className="text-slate-700 underline"
                                                                                     >
                                                                                         {attachment.filename || "attachment"}
